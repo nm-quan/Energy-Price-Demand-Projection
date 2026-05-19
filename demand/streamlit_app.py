@@ -15,12 +15,11 @@ import streamlit as st
 from demand_model import model
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "energy"))
-from energy_model import run_dispatch  # noqa: E402
-
+from energy_model import run_dispatch 
 ROOT = Path(__file__).resolve().parent.parent
 AVERAGE_DIR = ROOT / "data" / "processed" / "average"
 
-# ---------- Design tokens ----------
+
 INK = "#0f172a"          # primary text
 INK_SOFT = "#334155"     # secondary text
 INK_MUTE = "#64748b"     # tertiary / captions
@@ -29,14 +28,14 @@ CANVAS = "#ffffff"       # cards
 SURFACE = "#f8fafc"      # page background
 ACCENT = "#1e40af"       # single accent — deep indigo
 
-# Categorical series palette (Tableau 10–inspired, muted)
+
 C_ORIG = "#1e40af"       # original demand
 C_MOD = "#ea580c"        # modelled demand
 C_PRICE = "#7c3aed"      # RRP line
 BAND_RED = "#fecaca"     # reduction window shade
 BAND_GREEN = "#bbf7d0"   # free window shade
 
-# Dispatch stack (ordered baseload → peak)
+
 GEN_COLORS = {
     "Coal":        "#475569",
     "Gas Steam":   "#3b82f6",
@@ -377,14 +376,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(f"# VIC1 Demand & Dispatch")
-st.markdown(
-    f"<p style='color:{INK_MUTE} !important; margin-top:-0.1rem; "
-    f"margin-bottom:1.6rem; font-size:0.95rem;'>"
-    f"Tune a demand-response profile against averaged VIC1 days, then project "
-    f"the cost impact through an economic dispatch model.</p>",
-    unsafe_allow_html=True,
-)
 
 files = list_average_files()
 if not files:
