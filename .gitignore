@@ -1,6 +1,3 @@
-# Claude Code
-.claude/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -37,7 +34,5 @@ dist/
 Thumbs.db
 desktop.ini
 
-# Project data outputs (uncomment to ignore — keep generated CSVs out of git)
-# data/modelled/
-# data/processed/
-# figures/
+.claude/
+
