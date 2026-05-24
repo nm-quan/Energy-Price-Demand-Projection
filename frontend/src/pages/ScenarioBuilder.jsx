@@ -4,7 +4,7 @@ import {
   ChevronRight, Loader, AlertCircle, Sparkles, Send, Trash2, ArrowRight, FileText, Brain, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import {
-  getClient, generateScenarios, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
 } from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 
@@ -256,6 +256,7 @@ export default function ScenarioBuilder() {
   const [count, setCount] = useState(3);
   const [extraInstruction, setExtraInstruction] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [expandedId, setExpandedId] = useState(null);
@@ -283,18 +284,39 @@ export default function ScenarioBuilder() {
   const runGenerate = async () => {
     setGenerating(true);
     setError('');
+    setProgress('Starting…');
     try {
-      const res = await generateScenarios(id, count, extraInstruction.trim() || null);
-      const newScenarios = res.data.scenarios || [];
-      // Merge with existing — newest first
-      setScenarios((cur) => [...newScenarios, ...cur]);
-      setAgentMemory(res.data.agent_memory || []);
-      if (newScenarios[0]) setExpandedId(newScenarios[0].id);
-      setExtraInstruction('');
+      const res = await startGenerateScenarios(id, count, extraInstruction.trim() || null);
+      const jobId = res.data.job_id;
+      setProgress(`Claude is analysing the site (count=${count})…`);
+      // Poll until done
+      const start = Date.now();
+      const poll = async () => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const jobRes = await getGenerationJob(jobId);
+        const job = jobRes.data;
+        if (job.status === 'done') {
+          const newScenarios = job.scenarios || [];
+          setScenarios((cur) => [...newScenarios, ...cur]);
+          setAgentMemory(job.agent_memory || []);
+          if (newScenarios[0]) setExpandedId(newScenarios[0].id);
+          setExtraInstruction('');
+          setGenerating(false);
+          setProgress('');
+        } else if (job.status === 'error') {
+          setError(job.error || 'Generation failed.');
+          setGenerating(false);
+          setProgress('');
+        } else {
+          setProgress(`Generating ${count} scenario${count > 1 ? 's' : ''} in parallel · ${elapsed}s`);
+          setTimeout(poll, 2500);
+        }
+      };
+      setTimeout(poll, 1500);
     } catch (err) {
       setError(err.response?.data?.detail || 'Scenario generation failed. Try again.');
-    } finally {
       setGenerating(false);
+      setProgress('');
     }
   };
 
@@ -431,6 +453,16 @@ export default function ScenarioBuilder() {
             <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
               <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {generating && progress && (
+            <div
+              data-testid="generation-progress"
+              className="flex items-center gap-3 bg-violet/10 border border-violet/30 rounded-xl px-4 py-3 text-sm text-violet-700"
+            >
+              <Loader size={16} className="animate-spin text-violet" />
+              <span className="font-medium">{progress}</span>
             </div>
           )}
 

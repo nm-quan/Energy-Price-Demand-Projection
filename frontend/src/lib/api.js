@@ -31,11 +31,12 @@ export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
 export const recalcBaseline = (id, scales) => api.post(`/api/clients/${id}/baseline/recalc`, { scales });
 
 // Scenarios
-export const generateScenarios = (id, count, extraInstruction = null) =>
+export const startGenerateScenarios = (id, count, extraInstruction = null) =>
   api.post(`/api/clients/${id}/scenarios/generate`, {
     count,
     extra_instruction: extraInstruction,
   });
+export const getGenerationJob = (jobId) => api.get(`/api/scenarios/jobs/${jobId}`);
 export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
 export const deleteScenario = (sid) => api.delete(`/api/scenarios/${sid}`);
 export const clearClientScenarios = (id) => api.delete(`/api/clients/${id}/scenarios`);

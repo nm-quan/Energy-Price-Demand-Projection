@@ -1,23 +1,23 @@
 """
-Claude-powered dynamic scenario generator with proper tools.
+Claude-powered dynamic scenario generator.
 
-Tools available to Claude:
-  1. analyze_load_profile     — One-shot site analytics (peak buckets, by-appliance %).
-  2. compare_retailers        — Run the cost engine against each of the 5 retailers
-                                for a given annual_kwh + load curve.
-  3. simulate_appliance_change — Apply a per-appliance change (scale, shift, off)
-                                 and return the new appliance curves + savings
-                                 versus the current tariff.
-  4. commit_scenario          — Echo a fully-structured scenario back; used as a
-                                schema-enforced output channel.
+Each scenario is its own Claude conversation, run in parallel via a thread pool.
+This brings N=3 generation down from ~6 minutes to ~45 seconds.
 
-The final response is parsed JSON with `scenarios` + `agent_memory` (plain bullets).
+Tools (per scenario):
+  1. compare_retailers          — Run cost engine vs each of 5 retailers for a load curve.
+  2. simulate_appliance_change  — Apply a per-appliance change; return appliance + total curves + savings.
+  3. commit_scenario            — Echo a schema-conformant scenario payload back as confirmation.
+
+`analyze_load_profile` data is baked into the system message (no extra tool round-trip).
+Each scenario emits its own `memory_bullets`; we dedupe/cap to 6 across the batch.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 import anthropic
@@ -28,8 +28,8 @@ from baseline_engine import compute_annual_cost_components, compute_shape_metric
 logger = logging.getLogger("scenario_claude")
 
 MODEL_NAME = "claude-sonnet-4-5"
-MAX_TURNS = 16
-MAX_TOKENS = 4096
+MAX_TURNS = 12
+MAX_TOKENS = 2048
 
 
 def _has_api_key() -> bool:
@@ -47,31 +47,17 @@ def _get_client() -> anthropic.Anthropic:
 
 TOOLS: List[Dict[str, Any]] = [
     {
-        "name": "analyze_load_profile",
-        "description": (
-            "Get analytics for the site's baseline load shape: top peak buckets, "
-            "appliance share of energy, peak coincidence, suggested shift windows. "
-            "Call this once at the start to understand the site."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
         "name": "compare_retailers",
         "description": (
-            "Compare the 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) "
-            "against the supplied load curve and annual kWh. Returns per-retailer annual cost "
-            "and delta vs the client's current tariff. Use AFTER simulate_appliance_change "
-            "to find which retailer best fits the new shape."
+            "Compare 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) against "
+            "the supplied SHIFTED load curve. Returns per-retailer annual cost and delta vs the "
+            "client's current tariff. Call ONCE per scenario after you have the final shifted curve."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "load_curve": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "description": "48 half-hourly kW values for the SHIFTED profile",
-                },
-                "annual_kwh": {"type": "number", "description": "Annual consumption in kWh"},
+                "load_curve": {"type": "array", "items": {"type": "number"}},
+                "annual_kwh": {"type": "number"},
             },
             "required": ["load_curve", "annual_kwh"],
         },
@@ -79,95 +65,59 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "simulate_appliance_change",
         "description": (
-            "Apply a real operational change to ONE appliance and return the new appliance "
-            "curves + total load curve + savings vs baseline on the current tariff. "
-            "Use this MULTIPLE TIMES per scenario to model each appliance change you propose."
+            "Apply ONE operational change to ONE appliance. Returns before/after appliance "
+            "curves, the new total load curve, and savings vs baseline on the current tariff. "
+            "Chain multiple calls — state persists across calls within this scenario."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "appliance": {
-                    "type": "string",
-                    "description": "Appliance name (must match one from analyze_load_profile.appliance_share)",
-                },
-                "action": {
-                    "type": "string",
-                    "enum": ["scale", "shift_window", "set_off"],
-                    "description": (
-                        "scale=multiply this appliance by `scale_factor` across all buckets; "
-                        "shift_window=move energy from `from_window` to `to_window`; "
-                        "set_off=turn appliance off during `from_window`"
-                    ),
-                },
-                "scale_factor": {
-                    "type": "number",
-                    "description": "Used when action=scale (e.g. 0.7 = run at 70% during whole day)",
-                },
-                "from_window": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "[start_bucket, end_bucket] half-hour buckets 0–47",
-                },
-                "to_window": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "[start_bucket, end_bucket] target window for shifted energy",
-                },
-                "from_scale": {
-                    "type": "number",
-                    "description": "Fraction of from_window energy to move (0–1). Used with shift_window/set_off.",
-                },
+                "appliance": {"type": "string"},
+                "action": {"type": "string", "enum": ["scale", "shift_window", "set_off"]},
+                "scale_factor": {"type": "number"},
+                "from_window": {"type": "array", "items": {"type": "integer"}},
+                "to_window": {"type": "array", "items": {"type": "integer"}},
+                "from_scale": {"type": "number"},
             },
             "required": ["appliance", "action"],
         },
     },
     {
         "name": "commit_scenario",
-        "description": (
-            "Echo back the final, fully-structured scenario after all appliance changes and "
-            "retailer comparisons have been done. Call this ONCE per scenario. The tool result "
-            "is identical to your input but lets you confirm the schema before the final JSON."
-        ),
+        "description": "Return the final scenario summary. Call exactly ONCE. The server will fill in load curves from your simulate_appliance_change history.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
-                "rationale": {"type": "string", "description": "1–2 sentences plain English"},
+                "rationale": {"type": "string"},
                 "appliance_changes": {
                     "type": "array",
-                    "description": "List of changes applied (mirror the simulate_appliance_change calls used)",
+                    "description": "Brief summary of each change you made (no curves — server adds them).",
                     "items": {
                         "type": "object",
                         "properties": {
                             "appliance": {"type": "string"},
                             "action": {"type": "string"},
-                            "summary": {"type": "string", "description": "Plain-English summary, e.g. 'Pre-cool HVAC 1pm–3pm at 70%'"},
-                            "before_curve": {"type": "array", "items": {"type": "number"}},
-                            "after_curve": {"type": "array", "items": {"type": "number"}},
+                            "summary": {"type": "string"},
                         },
                         "required": ["appliance", "action", "summary"],
                     },
                 },
-                "shifted_curve": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "description": "Final 48-bucket total kW curve after ALL changes",
-                },
-                "retailer_winner": {
-                    "type": "string",
-                    "description": "Name of the recommended retailer from compare_retailers",
-                },
-                "negotiation_levers": {
+                "retailer_winner": {"type": "string"},
+                "negotiation_levers": {"type": "array", "items": {"type": "string"}},
+                "memory_bullets": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Bullet list of metrics the broker can use to negotiate with the retailer",
+                    "description": "1–3 plain-English insights about the site (used in agent memory side panel)",
                 },
                 "savings_annual_low": {"type": "number"},
                 "savings_annual_high": {"type": "number"},
             },
-            "required": ["name", "rationale", "appliance_changes", "shifted_curve",
-                         "retailer_winner", "negotiation_levers",
-                         "savings_annual_low", "savings_annual_high"],
+            "required": [
+                "name", "rationale", "appliance_changes",
+                "retailer_winner", "negotiation_levers", "memory_bullets",
+                "savings_annual_low", "savings_annual_high",
+            ],
         },
     },
 ]
@@ -176,7 +126,6 @@ TOOLS: List[Dict[str, Any]] = [
 # ── Tool implementations ────────────────────────────────────────────────────
 
 def _aggregate_appliance_curves(appliance_curves: Dict[str, List[float]]) -> List[float]:
-    """Sum per-appliance curves into a total 48-bucket load curve."""
     if not appliance_curves:
         return [0.0] * 48
     total = [0.0] * 48
@@ -184,46 +133,6 @@ def _aggregate_appliance_curves(appliance_curves: Dict[str, List[float]]) -> Lis
         for i, v in enumerate(curve[:48]):
             total[i] += float(v or 0.0)
     return total
-
-
-def _tool_analyze_load_profile(state: Dict[str, Any]) -> Dict[str, Any]:
-    appliance_curves: Dict[str, List[float]] = state["appliance_curves"]
-    total = state["baseline_curve"]
-    tariff: Tariff = state["tariff"]
-    annual_kwh = state["annual_kwh"]
-    shape = compute_shape_metrics(total, annual_kwh)
-
-    # Appliance share of total energy
-    appliance_share: Dict[str, float] = {}
-    total_kwh = sum(total) * 0.5
-    for name, curve in appliance_curves.items():
-        appliance_share[name] = round((sum(curve) * 0.5) / total_kwh, 4) if total_kwh > 0 else 0.0
-
-    # Top 5 peak buckets
-    indexed = sorted(enumerate(total), key=lambda kv: -kv[1])[:5]
-    top_buckets = [
-        {"bucket": b, "time": f"{b // 2:02d}:{(b % 2) * 30:02d}", "kw": round(v, 3)}
-        for b, v in indexed
-    ]
-
-    return {
-        "site_type": state["client"].get("site_type"),
-        "shape_metrics": shape,
-        "appliance_share": appliance_share,
-        "top_peak_buckets": top_buckets,
-        "tou_windows": {
-            "peak": "buckets 30–42 (3pm–9pm)",
-            "shoulder": "buckets 14–30 (7am–3pm), 42–44 (9pm–10pm)",
-            "offpeak": "buckets 0–14 (midnight–7am), 44–48 (10pm–midnight)",
-        },
-        "current_tariff": {
-            "retailer": tariff.retailer,
-            "plan": tariff.plan_name,
-            "peak_rate": tariff.energy_rates.peak,
-            "shoulder_rate": tariff.energy_rates.shoulder,
-            "offpeak_rate": tariff.energy_rates.offpeak,
-        },
-    }
 
 
 def _tool_compare_retailers(state: Dict[str, Any], load_curve: List[float], annual_kwh: float) -> Dict[str, Any]:
@@ -244,7 +153,6 @@ def _tool_compare_retailers(state: Dict[str, Any], load_curve: List[float], annu
             "peak_rate": t.energy_rates.peak,
             "shoulder_rate": t.energy_rates.shoulder,
             "offpeak_rate": t.energy_rates.offpeak,
-            "supply_charge_daily": t.supply_charge,
             "annual_cost": round(cost, 2),
             "delta_vs_current": round(cost - current_cost, 2),
             "delta_pct": round((cost - current_cost) / current_cost * 100, 2) if current_cost > 0 else 0,
@@ -255,7 +163,6 @@ def _tool_compare_retailers(state: Dict[str, Any], load_curve: List[float], annu
         "current_annual_cost": round(current_cost, 2),
         "comparison": rows,
         "best": rows[0]["retailer"] if rows else None,
-        "max_saving_vs_current": round(current_cost - rows[0]["annual_cost"], 2) if rows else 0,
     }
 
 
@@ -291,108 +198,96 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
             delta = before[b] * fs
             after[b] = before[b] - delta
             moved_kwh += delta * 0.5
-        # Distribute moved kWh evenly across to_window
         to_buckets = max(1, t_e - t_s)
-        add_per_bucket = (moved_kwh / 0.5) / to_buckets  # kW per bucket
+        add_per_bucket = (moved_kwh / 0.5) / to_buckets
         for b in range(max(0, t_s), min(48, t_e)):
             after[b] = after[b] + add_per_bucket
     else:
         return {"error": f"unknown action {action}"}
 
-    # Apply to working state so chained calls compose
     appliance_curves[name] = after
     state["working_curves"] = appliance_curves
+
+    # Track simulation history so commit_scenario can later look up curves
+    state.setdefault("sim_history", []).append({
+        "appliance": name,
+        "action": action,
+        "before_curve": [round(v, 4) for v in before],
+        "after_curve": [round(v, 4) for v in after],
+    })
 
     new_total = _aggregate_appliance_curves(appliance_curves)
     baseline_total = state["baseline_curve"]
     tariff: Tariff = state["tariff"]
     annual_kwh = state["annual_kwh"]
 
-    # Scale annual kWh proportionally to new curve
     baseline_sum = sum(baseline_total)
     new_sum = sum(new_total)
     new_annual_kwh = annual_kwh * (new_sum / baseline_sum) if baseline_sum > 0 else annual_kwh
 
     base_cost = compute_annual_cost_components(baseline_total, tariff, annual_kwh)["grand_total"]
     new_cost = compute_annual_cost_components(new_total, tariff, new_annual_kwh)["grand_total"]
-    saving = round(base_cost - new_cost, 2)
 
     return {
         "appliance": name,
-        "action": action,
         "before_curve": [round(v, 3) for v in before],
         "after_curve": [round(v, 3) for v in after],
         "total_curve_after": [round(v, 3) for v in new_total],
-        "annual_kwh_after": round(new_annual_kwh, 1),
         "annual_cost_before": round(base_cost, 2),
         "annual_cost_after": round(new_cost, 2),
-        "annual_saving_on_current_tariff": saving,
+        "annual_saving_on_current_tariff": round(base_cost - new_cost, 2),
         "peak_kw_after": round(max(new_total), 3) if new_total else 0,
     }
 
 
-def _tool_commit_scenario(_state: Dict[str, Any], inp: Dict[str, Any]) -> Dict[str, Any]:
-    # Echo back the scenario so Claude sees a clean schema confirmation.
-    return {"committed": True, "scenario": inp}
+# ── Per-scenario system prompt ──────────────────────────────────────────────
 
+PER_SCENARIO_SYSTEM = """You are an energy savings analyst. Generate ONE realistic load-shift scenario for this site.
 
-# ── User message ────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are a senior energy savings analyst for a broker.
-Your job: generate exactly N realistic, site-specific load-shift scenarios.
-
-WORKFLOW PER REQUEST:
-1. Call analyze_load_profile ONCE first to understand the site.
-2. For EACH of the N scenarios:
-   a. Decide the operational change (which appliance, action, window) based on the site type and shape.
-   b. Call simulate_appliance_change for EACH appliance you want to change. Multiple calls compose.
-   c. Once the final shape is good, call compare_retailers with the shifted curve to pick the best retailer.
-   d. Call commit_scenario with the complete payload.
-3. After ALL N scenarios are committed, output ONE final JSON object — no markdown, no commentary:
-
-{
-  "scenarios": [<scenario from each commit_scenario call, with rank added>],
-  "agent_memory": [
-    "Bullet 1 — concise insight you learned about THIS site",
-    "Bullet 2 — ...",
-    "Bullet 3 — ..."
-  ]
-}
+WORKFLOW:
+1. Call simulate_appliance_change one or more times to model the operational change.
+   - The working curves persist across calls within this scenario.
+   - Use scale, shift_window, or set_off actions on real appliances from the site.
+2. Call compare_retailers ONCE with the final shifted curve to find the best retailer.
+3. Call commit_scenario ONCE with the complete payload (name, rationale, appliance_changes, shifted_curve, retailer_winner, negotiation_levers, memory_bullets, savings_annual_low/high).
 
 CONSTRAINTS:
-- Be creative and SPECIFIC to the site_type. A cafe is not an office.
-- Each scenario must change at least one appliance.
-- Scenarios should be distinct (don't propose the same battery twice).
-- For TOU sites, focus on shifting load OUT of buckets 30–42 (3pm–9pm peak).
-- agent_memory: 4–6 short, broker-useful bullets. Plain text, no markdown.
-- Buckets are 0–47 half-hourly (0=midnight, 30=3pm, 42=9pm, 47=11:30pm).
-- IMPORTANT: working_curves are reset between scenarios — each scenario starts from the original baseline."""
+- Be SPECIFIC to the site_type. A cafe is not an office.
+- Buckets are 0–47 half-hourly (0=midnight, 30=3pm peak start, 42=9pm peak end).
+- For TOU sites, focus on moving load OUT of 30–42 (3pm–9pm peak).
+- savings_annual_high should be ≥ savings_annual_low. Use the compare_retailers delta + the appliance simulation savings to estimate the range.
+- memory_bullets: 2–3 short insights about THIS site (not generic advice). Plain text.
+- After commit_scenario returns, output EXACTLY: DONE"""
 
 
-def _build_user_message(
+def _build_user_message_one(
     client: Dict[str, Any],
-    baseline: Dict[str, Any],
+    shape: Dict[str, Any],
     tariff: Tariff,
     annual_kwh: float,
-    count: int,
+    load_curve: List[float],
+    appliance_share: Dict[str, float],
+    scenario_idx: int,
+    total_count: int,
     extra_instruction: Optional[str],
+    avoid_themes: List[str],
 ) -> str:
-    shape = baseline.get("shape_metrics", {})
     rates = tariff.energy_rates
+    top_appliances = sorted(appliance_share.items(), key=lambda kv: -kv[1])[:4]
+    appliance_str = ", ".join(f"{k} {v*100:.0f}%" for k, v in top_appliances)
     msg = (
         f"Site: {client.get('name')}, {client.get('address') or 'address not provided'}\n"
         f"Site type: {client.get('site_type')}\n"
-        f"Annual consumption: {shape.get('annual_kwh', annual_kwh):.0f} kWh\n"
-        f"Peak demand: {shape.get('peak_kw', 0):.1f} kW\n"
-        f"Load factor: {(shape.get('load_factor') or 0) * 100:.1f}%\n"
-        f"Current tariff: {tariff.retailer} {tariff.plan_name}\n"
-        f"  - Peak: {rates.peak or 0:.4f} $/kWh\n"
-        f"  - Shoulder: {rates.shoulder or 0:.4f} $/kWh\n"
-        f"  - Off-peak: {rates.offpeak or 0:.4f} $/kWh\n\n"
-        f"Generate exactly {count} scenarios. Follow the workflow strictly."
+        f"Annual: {annual_kwh:.0f} kWh · Peak: {shape.get('peak_kw', 0):.1f} kW · Load factor: {(shape.get('load_factor') or 0) * 100:.0f}%\n"
+        f"Peak coincidence (3–9pm share): {(shape.get('peak_coincidence') or 0) * 100:.0f}%\n"
+        f"Top appliances: {appliance_str}\n"
+        f"Current tariff: {tariff.retailer} {tariff.plan_name} — Peak ${rates.peak or 0:.3f}, Shoulder ${rates.shoulder or 0:.3f}, Off-peak ${rates.offpeak or 0:.3f} per kWh\n\n"
+        f"This is scenario {scenario_idx} of {total_count}. Generate ONE load-shift scenario."
     )
+    if avoid_themes:
+        msg += f"\nDo NOT propose any of these (already taken): {', '.join(avoid_themes)}"
     if extra_instruction:
-        msg += f"\n\nBroker focus: {extra_instruction}"
+        msg += f"\nBroker focus: {extra_instruction}"
     return msg
 
 
@@ -421,46 +316,40 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_text(content_blocks: List[Any]) -> str:
-    return "".join(getattr(b, "text", "") for b in content_blocks if getattr(b, "type", None) == "text")
-
-
-def generate_scenarios(
+def _generate_one(
+    cli: anthropic.Anthropic,
     client: Dict[str, Any],
-    baseline: Dict[str, Any],
     appliance_curves: Dict[str, List[float]],
+    baseline_curve: List[float],
     tariff: Tariff,
     annual_kwh: float,
-    count: int = 3,
-    extra_instruction: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Drive Claude through tool-use loop and return scenarios + agent_memory."""
-    cli = _get_client()
-    baseline_curve = list(baseline.get("load_curve", []))
-
-    # Shared state that tools mutate (working_curves resets per simulate call chain;
-    # we reset between scenarios via Claude's awareness — see system prompt).
+    shape: Dict[str, Any],
+    appliance_share: Dict[str, float],
+    scenario_idx: int,
+    total_count: int,
+    extra_instruction: Optional[str],
+    avoid_themes: List[str],
+) -> Optional[Dict[str, Any]]:
     state: Dict[str, Any] = {
-        "client": client,
         "tariff": tariff,
         "annual_kwh": annual_kwh,
         "baseline_curve": baseline_curve,
-        "appliance_curves": appliance_curves,
         "working_curves": {k: list(v) for k, v in appliance_curves.items()},
     }
-
-    user_msg = _build_user_message(client, baseline, tariff, annual_kwh, count, extra_instruction)
+    user_msg = _build_user_message_one(
+        client, shape, tariff, annual_kwh, baseline_curve, appliance_share,
+        scenario_idx, total_count, extra_instruction, avoid_themes,
+    )
     messages: List[Dict[str, Any]] = [
         {"role": "user", "content": [{"type": "text", "text": user_msg}]}
     ]
-
-    committed_scenarios: List[Dict[str, Any]] = []
+    committed: Optional[Dict[str, Any]] = None
 
     for _turn in range(MAX_TURNS):
         resp = cli.messages.create(
             model=MODEL_NAME,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=PER_SCENARIO_SYSTEM,
             tools=TOOLS,
             messages=messages,
         )
@@ -482,13 +371,11 @@ def generate_scenarios(
 
         messages.append({"role": "assistant", "content": assistant_blocks})
 
-        if resp.stop_reason == "tool_use" and tool_use_blocks:
+        if tool_use_blocks:
             tool_results = []
             for tu in tool_use_blocks:
                 try:
-                    if tu.name == "analyze_load_profile":
-                        out = _tool_analyze_load_profile(state)
-                    elif tu.name == "compare_retailers":
+                    if tu.name == "compare_retailers":
                         out = _tool_compare_retailers(
                             state,
                             tu.input.get("load_curve", []),
@@ -497,10 +384,8 @@ def generate_scenarios(
                     elif tu.name == "simulate_appliance_change":
                         out = _tool_simulate_appliance_change(state, tu.input or {})
                     elif tu.name == "commit_scenario":
-                        out = _tool_commit_scenario(state, tu.input or {})
-                        committed_scenarios.append(tu.input or {})
-                        # Reset working curves so the next scenario starts fresh
-                        state["working_curves"] = {k: list(v) for k, v in appliance_curves.items()}
+                        out = {"committed": True}
+                        committed = tu.input or {}
                     else:
                         out = {"error": f"unknown tool {tu.name}"}
                     tool_results.append({
@@ -517,28 +402,127 @@ def generate_scenarios(
                         "is_error": True,
                     })
             messages.append({"role": "user", "content": tool_results})
+            # If we already committed, attach curves from sim history and return
+            if committed:
+                return _finalize_committed(committed, state)
             continue
 
-        # No more tools — parse final JSON
-        final_text = _extract_text(resp.content)
-        parsed = _try_parse_json(final_text)
-        if parsed and isinstance(parsed.get("scenarios"), list):
-            scenarios = parsed["scenarios"]
-            memory = parsed.get("agent_memory") or []
-            for i, s in enumerate(scenarios, start=1):
-                s["rank"] = i
-            return {"scenarios": scenarios, "agent_memory": memory, "source": "claude"}
+        # end_turn — no tool calls this round
+        if committed:
+            return _finalize_committed(committed, state)
+        # Maybe Claude returned the payload inline as JSON
+        text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text")
+        parsed = _try_parse_json(text)
+        if parsed and parsed.get("appliance_changes"):
+            return _finalize_committed(parsed, state)
+        # Nudge Claude to actually use the tools
+        messages.append({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    "Please proceed by calling simulate_appliance_change, then compare_retailers, "
+                    "and finally commit_scenario. Do not respond with plain text."
+                ),
+            }],
+        })
+        continue
 
-        # Fallback: rebuild from committed_scenarios
-        if committed_scenarios:
-            for i, s in enumerate(committed_scenarios, start=1):
-                s["rank"] = i
-            return {
-                "scenarios": committed_scenarios,
-                "agent_memory": ["(agent memory unavailable — fell back to committed scenarios)"],
-                "source": "claude-tools-only",
-            }
+    logger.warning("scenario hit MAX_TURNS=%d without commit_scenario", MAX_TURNS)
+    return _finalize_committed(committed, state) if committed else None
 
-        raise RuntimeError("Claude returned no parseable scenarios and no commit_scenario calls")
 
-    raise RuntimeError(f"Claude tool-use loop exceeded {MAX_TURNS} turns")
+def _finalize_committed(committed: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach load curves to the committed payload using simulation history."""
+    sim_history: List[Dict[str, Any]] = state.get("sim_history", [])
+    # For each appliance_changes entry, find the FIRST matching sim_history record by appliance name.
+    # Multiple changes to the same appliance: pop them in order so each gets a unique record.
+    history_by_app: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in sim_history:
+        history_by_app.setdefault(rec["appliance"], []).append(rec)
+
+    enriched_changes: List[Dict[str, Any]] = []
+    for ch in committed.get("appliance_changes", []) or []:
+        ch_copy = dict(ch)
+        records = history_by_app.get(ch_copy.get("appliance"), [])
+        if records:
+            rec = records.pop(0)
+            ch_copy["before_curve"] = rec["before_curve"]
+            ch_copy["after_curve"] = rec["after_curve"]
+        enriched_changes.append(ch_copy)
+    committed["appliance_changes"] = enriched_changes
+
+    # Always recompute shifted_curve from final working state
+    working = state.get("working_curves") or {}
+    shifted = _aggregate_appliance_curves(working)
+    committed["shifted_curve"] = [round(v, 3) for v in shifted]
+    return committed
+
+
+def generate_scenarios(
+    client: Dict[str, Any],
+    baseline: Dict[str, Any],
+    appliance_curves: Dict[str, List[float]],
+    tariff: Tariff,
+    annual_kwh: float,
+    count: int = 3,
+    extra_instruction: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate N scenarios in parallel via thread pool."""
+    cli = _get_client()
+    baseline_curve = list(baseline.get("load_curve", []))
+    shape = compute_shape_metrics(baseline_curve, annual_kwh)
+
+    # Pre-compute appliance share (no extra Claude tool call)
+    total_kwh = sum(baseline_curve) * 0.5
+    appliance_share: Dict[str, float] = {}
+    for name, curve in appliance_curves.items():
+        appliance_share[name] = (sum(curve) * 0.5) / total_kwh if total_kwh > 0 else 0.0
+
+    avoid_themes: List[str] = []
+    scenarios: List[Dict[str, Any]] = []
+
+    # Generate in parallel
+    with ThreadPoolExecutor(max_workers=min(count, 5)) as pool:
+        futures = {
+            pool.submit(
+                _generate_one,
+                cli, client, appliance_curves, baseline_curve, tariff, annual_kwh,
+                shape, appliance_share, i + 1, count, extra_instruction, avoid_themes,
+            ): i + 1
+            for i in range(count)
+        }
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                result = fut.result()
+                if result and result.get("shifted_curve"):
+                    scenarios.append(result)
+                else:
+                    logger.warning("scenario %d returned no committed payload (result=%s)", idx, bool(result))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("scenario %d failed: %s", idx, exc)
+
+    if not scenarios:
+        raise RuntimeError("All scenario generations failed")
+
+    # Sort by savings_low desc, re-rank
+    scenarios.sort(key=lambda s: s.get("savings_annual_low", 0), reverse=True)
+    for i, s in enumerate(scenarios, start=1):
+        s["rank"] = i
+
+    # Combine memory bullets: dedupe (case-insensitive prefix) and cap at 6
+    seen = set()
+    memory: List[str] = []
+    for s in scenarios:
+        for bullet in s.get("memory_bullets", []) or []:
+            key = bullet.strip().lower()[:60]
+            if key and key not in seen:
+                seen.add(key)
+                memory.append(bullet.strip())
+            if len(memory) >= 6:
+                break
+        if len(memory) >= 6:
+            break
+
+    return {"scenarios": scenarios, "agent_memory": memory, "source": "claude"}

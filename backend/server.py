@@ -4,6 +4,7 @@ Energy Broker API — FastAPI backend (no auth, no demo, dynamic scenarios).
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
@@ -15,6 +16,10 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# In-memory job store for async scenario generation
+JOBS: Dict[str, Dict[str, Any]] = {}
+JOBS_LOCK = threading.Lock()
 
 import data_store
 from models import (
@@ -380,22 +385,21 @@ class GenerateScenariosRequest(BaseModel):
     extra_instruction: Optional[str] = None
 
 
-@app.post("/api/clients/{client_id}/scenarios/generate")
-def generate_client_scenarios(client_id: str, body: GenerateScenariosRequest, response: Response):
-    client = data_store.clients.get(client_id)
-    if client is None:
-        raise HTTPException(status_code=404, detail="Client not found")
-    if not _has_api_key():
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on the server")
-
-    count = max(1, min(10, int(body.count or 3)))
-    tariff = _resolve_tariff(client_id)
-    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
-    baseline = compute_baseline(load_curve, tariff, annual_kwh)
-    appliance_curves = _split_appliance_curves(load_curve, client.get("site_type", "office"))
-    baseline["load_curve"] = load_curve  # ensure raw curve present
-
+def _run_generation_job(job_id: str, client_id: str, count: int, extra_instruction: Optional[str]) -> None:
+    """Background worker for /scenarios/generate. Writes scenarios into the store on success."""
     try:
+        client = data_store.clients.get(client_id)
+        if client is None:
+            with JOBS_LOCK:
+                JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": "Client deleted"}
+            return
+
+        tariff = _resolve_tariff(client_id)
+        load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+        baseline = compute_baseline(load_curve, tariff, annual_kwh)
+        appliance_curves = _split_appliance_curves(load_curve, client.get("site_type", "office"))
+        baseline["load_curve"] = load_curve
+
         result = generate_scenarios(
             client=client,
             baseline=baseline,
@@ -403,38 +407,83 @@ def generate_client_scenarios(client_id: str, body: GenerateScenariosRequest, re
             tariff=tariff,
             annual_kwh=annual_kwh,
             count=count,
-            extra_instruction=body.extra_instruction,
+            extra_instruction=extra_instruction,
         )
+
+        # Guard: if client was deleted while we were running, abort persist
+        if client_id not in data_store.clients:
+            with JOBS_LOCK:
+                JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": "Client deleted during generation"}
+            return
+
+        stored_ids: List[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for s in result.get("scenarios", []):
+            sid = f"scn-{uuid.uuid4().hex[:8]}"
+            record = {
+                "id": sid,
+                "client_id": client_id,
+                "created_at": now,
+                "baseline_curve": [round(v, 4) for v in load_curve],
+                "baseline_appliance_curves": appliance_curves,
+                "agent_memory": result.get("agent_memory", []),
+                "extra_instruction": extra_instruction,
+                **s,
+            }
+            data_store.scenarios[sid] = record
+            stored_ids.append(sid)
+        data_store.save_to_disk()
+
+        with JOBS_LOCK:
+            JOBS[job_id] = {
+                **JOBS.get(job_id, {}),
+                "status": "done",
+                "scenarios": [data_store.scenarios[sid] for sid in stored_ids],
+                "agent_memory": result.get("agent_memory", []),
+                "source": result.get("source", "claude"),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Claude scenario generation failed")
-        raise HTTPException(status_code=502, detail=f"Scenario generation failed: {exc}")
+        logger.exception("Scenario generation job %s failed", job_id)
+        with JOBS_LOCK:
+            JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": str(exc)[:300]}
 
-    response.headers["X-Scenario-Source"] = result.get("source", "claude")
 
-    # Persist each scenario as its own DB record
-    stored_ids = []
-    now = datetime.now(timezone.utc).isoformat()
-    for s in result.get("scenarios", []):
-        sid = f"scn-{uuid.uuid4().hex[:8]}"
-        record = {
-            "id": sid,
+@app.post("/api/clients/{client_id}/scenarios/generate", status_code=202)
+def start_generate_job(client_id: str, body: GenerateScenariosRequest):
+    """Kick off scenario generation in the background. Returns a job_id to poll."""
+    client = data_store.clients.get(client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not _has_api_key():
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+    count = max(1, min(10, int(body.count or 3)))
+
+    job_id = f"job-{uuid.uuid4().hex[:10]}"
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
             "client_id": client_id,
-            "created_at": now,
-            "baseline_curve": [round(v, 4) for v in load_curve],
-            "baseline_appliance_curves": appliance_curves,
-            "agent_memory": result.get("agent_memory", []),
-            "extra_instruction": body.extra_instruction,
-            **s,
+            "status": "running",
+            "count": count,
+            "started_at": datetime.now(timezone.utc).isoformat(),
         }
-        data_store.scenarios[sid] = record
-        stored_ids.append(sid)
-    data_store.save_to_disk()
+    thread = threading.Thread(
+        target=_run_generation_job,
+        args=(job_id, client_id, count, body.extra_instruction),
+        daemon=True,
+    )
+    thread.start()
+    return {"job_id": job_id, "status": "running"}
 
-    return {
-        "scenarios": [data_store.scenarios[sid] for sid in stored_ids],
-        "agent_memory": result.get("agent_memory", []),
-        "source": result.get("source", "claude"),
-    }
+
+@app.get("/api/scenarios/jobs/{job_id}")
+def get_generation_job(job_id: str):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/api/clients/{client_id}/scenarios")
