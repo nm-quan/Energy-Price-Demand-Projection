@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+/* Tabular figures for stats */
+.tabnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Subtle sparkline svg */
+.sparkline {
+  shape-rendering: geometricPrecision;
+}
+
+/* Drag handle */
+.draggable-handle {
+  cursor: grab;
+}
+.draggable-handle:active {
+  cursor: grabbing;
+}
+
+/* Scroll snapping on retailer-card strip */
+.snap-strip {
+  scroll-snap-type: x mandatory;
+}
+.snap-strip > * {
+  scroll-snap-align: start;
+}
+
+/* Hide scrollbar on horizontal strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+/* Section labels */
+.eyebrow {
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #64748b;
+}
