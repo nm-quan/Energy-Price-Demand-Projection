@@ -25,19 +25,24 @@ A web app where a business owner sees their current energy load shape rendered a
   - `MeterRail.jsx` / `StatStrip.jsx` / `ShiftLibrary.jsx` / `PlanStrip.jsx`
 - **Storage**: MongoDB available (MONGO_URL/DB_NAME) but unused in MVP — data is in-process.
 
-## Implemented (2026-01-24)
-- [x] Pre-loaded 5 sample meters spanning 4 archetypes and 4 distribution zones (Citipower VIC, Ausgrid NSW, Energex QLD, SAPN SA).
-- [x] 48-bucket (30-min) load curves per archetype, scaled to each meter's annual_kwh.
-- [x] TOU period band overlays (zone-aware: peak red, shoulder amber, off-peak green).
-- [x] NEM spot price overlay sourced from existing VIC1 averaged dataset.
-- [x] Draggable shift-block library (4-5 assets per archetype) with feasibility tags (easy/medium/hard), hardware-cost estimates, and constraint notes.
-- [x] Live stat strip (annual spend, best plan cost, achievable saving, load factor, peak kW, % peak usage).
-- [x] Bottom retailer-plan strip — 12 plans (TOU + Flat + Demand) modeled on AER CDR public dataset; re-ranks live as the user drags.
+## Implemented (2026-01-24 → 2026-01-24 iter 2)
+- [x] Pre-loaded 10-site **cafe chain** portfolio spanning 4 distribution zones (Citipower VIC, Ausgrid NSW, Energex QLD, SAPN SA). Annual usage 16.4–31.4 MWh per site.
+- [x] **Appliance-level load decomposition** — each meter's curve is the sum of 8 named appliances (fridges, espresso, ovens, HVAC, lighting, dishwasher, hot-water, misc). Only HVAC, dishwasher, hot-water are shiftable; the rest contribute fixed baseline.
+- [x] **Multi-meter aggregation** — shift-click a meter card to add to selection; "Aggregate all sites" button selects all 10. Aggregation banner lists every site; shifts apply chain-wide; plans ranked by sum of per-meter cost on each meter's own zone.
+- [x] 48-bucket TOU period band overlays, zone-aware (peak red, shoulder amber, off-peak green).
+- [x] NEM spot price overlay (real VIC1 averaged half-hourly RRP).
+- [x] Draggable shift blocks with feasibility tags (easy/medium/hard), hardware-cost estimates, and constraint notes.
+- [x] Live stat strip: annual spend, best plan cost, achievable saving, load factor, peak kW, % peak usage. Updates live as the user drags.
+- [x] Bottom retailer-plan strip — 12 plans (TOU + Flat + Demand) modeled on AER CDR public dataset; re-ranks live; original (strikethrough) vs shifted with annual delta and % change.
 - [x] Cost engine with TOU/Flat/Demand modes; peak-kW clamp guard for Demand plans.
-- [x] Best-effort `/api/refresh-cdr` endpoint (live AER CDR public API check).
+- [x] Best-effort `/api/refresh-cdr` endpoint (live AER CDR public API check, returns per-retailer status).
 - [x] Reset-per-asset and Reset-all-shifts controls.
-- [x] Backend pytest suite (12/12 pass).
-- [x] Frontend e2e flows verified (testing agent iteration 1).
+- [x] Backend pytest suite **14/14 pass**, frontend e2e validated by testing agent (iterations 1 + 2 — 0 issues).
+- [x] Aggregate single-shift saving scales linearly with chain size (verified test: 10× single-site delta).
+
+## Wow numbers
+- Single site (Brunswick East): **$1,354/yr** achievable by switching plan.
+- 10-site chain aggregated: **$12,872/yr** by switching plan + extra **$2,310/yr** by shifting dishwasher cycles chain-wide.
 
 ## Backlog (P0)
 - [ ] **Page 2** — Plain-language → structured shift scenarios via Claude (user-supplied Anthropic key, cheapest model).
