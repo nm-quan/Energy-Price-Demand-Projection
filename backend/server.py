@@ -38,6 +38,8 @@ from seed_data import (
 )
 from cost_engine import annual_cost, shape_stats
 from scenario_chat import ChatRequest, ChatResponse, run_chat
+from historical import synthesize_for_range
+import supabase_client as sb
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -147,42 +149,32 @@ async def spot_prices():
 
 @app.post("/api/rank")
 async def rank_plans(req: RankRequest):
-    meters = [_meter(mid) for mid in req.meter_ids]
+    return _rank_for(req.meter_ids, req.appliance_scales)
 
-    # Build appliance breakdown — aggregated across selected meters.
-    # We always show ALL 8 appliances in the breakdown (even if toggled off the
-    # frontend uses this to render the stacked chart for the active subset).
+
+def _rank_for(meter_ids: List[str], appliance_scales: Dict[str, float]) -> Dict[str, Any]:
+    """Pure helper — same logic as POST /api/rank but invokable from Python (used by Claude tool-use)."""
+    meters = [_meter(mid) for mid in meter_ids]
     appliance_template = ARCHETYPE_APPLIANCES.get(meters[0]["archetype"], [])
     appliance_order = [a["id"] for a in appliance_template]
+    appliance_meta = {a["id"]: a for a in appliance_template}
 
     per_appliance_profiles: Dict[str, List[float]] = {aid: [0.0] * 48 for aid in appliance_order}
-    appliance_meta: Dict[str, Dict] = {a["id"]: a for a in appliance_template}
-
     for m in meters:
         for a in meter_appliances(m):
             for i, v in enumerate(a["profile"]):
                 per_appliance_profiles[a["id"]][i] += v
 
-    # Determine effective scales (default 1.0 for any unspecified appliance)
-    scales: Dict[str, float] = {}
-    for aid in appliance_order:
-        scales[aid] = float(req.appliance_scales.get(aid, 1.0))
+    scales = {aid: float(appliance_scales.get(aid, 1.0)) for aid in appliance_order}
 
-    # Build per-meter shapes (active and full)
-    per_meter = []
-    full_shapes: List[List[float]] = []
-    active_shapes: List[List[float]] = []
+    per_meter, full_shapes, active_shapes = [], [], []
     for m in meters:
         full = meter_baseline_shape(m)
         active_s = meter_active_shape(m, scales)
         full_shapes.append(full)
         active_shapes.append(active_s)
-        per_meter.append({
-            "meter_id": m["id"],
-            "zone_code": m["zone_code"],
-            "full_shape": full,
-            "active_shape": active_s,
-        })
+        per_meter.append({"meter_id": m["id"], "zone_code": m["zone_code"],
+                          "full_shape": full, "active_shape": active_s})
 
     agg_full = _sum_shapes(full_shapes)
     agg_active = _sum_shapes(active_shapes)
@@ -193,23 +185,15 @@ async def rank_plans(req: RankRequest):
         scale = scales[aid]
         prof = [round(v * scale, 4) for v in per_appliance_profiles[aid]]
         appliance_breakdown.append({
-            "id": aid,
-            "name": meta["name"],
-            "color": meta["color"],
-            "always_on": meta.get("always_on", False),
-            "note": meta.get("note", ""),
-            "profile": prof,
-            "daily_kwh": round(sum(prof) * 0.5, 2),
-            "scale": scale,
-            "active": scale > 0,
+            "id": aid, "name": meta["name"], "color": meta["color"],
+            "always_on": meta.get("always_on", False), "note": meta.get("note", ""),
+            "profile": prof, "daily_kwh": round(sum(prof) * 0.5, 2),
+            "scale": scale, "active": scale > 0,
         })
 
-    # Rank plans by sum of per-meter cost on each meter's distribution zone,
-    # using the active shape.
     ranked = []
     for plan in SAMPLE_PLANS:
-        sum_full = 0.0
-        sum_active = 0.0
+        sum_full = sum_active = 0.0
         for pm, m in zip(per_meter, meters):
             sum_full += annual_cost(pm["full_shape"], plan, m["zone_code"])["annual_total"]
             sum_active += annual_cost(pm["active_shape"], plan, m["zone_code"])["annual_total"]
@@ -218,9 +202,7 @@ async def rank_plans(req: RankRequest):
             "baseline_cost": round(sum_full, 2),
             "shifted_cost": round(sum_active, 2),
             "annual_delta": round(sum_active - sum_full, 2),
-            "pct_delta": round(
-                (sum_active - sum_full) / max(sum_full, 1e-9) * 100.0, 2
-            ),
+            "pct_delta": round((sum_active - sum_full) / max(sum_full, 1e-9) * 100.0, 2),
         })
     ranked.sort(key=lambda r: r["shifted_cost"])
 
@@ -228,21 +210,17 @@ async def rank_plans(req: RankRequest):
     current = next((r for r in ranked if r["plan"]["id"] == current_plan_id), ranked[0])
     best = ranked[0]
     achievable_saving = round(current["shifted_cost"] - best["shifted_cost"], 2)
-
     agg_zone = max(
         {m["zone_code"] for m in meters},
         key=lambda z: sum(1 for m in meters if m["zone_code"] == z),
     )
 
     return {
-        "meter_ids": req.meter_ids,
+        "meter_ids": meter_ids,
         "n_sites": len(meters),
         "appliance_scales": scales,
         "appliance_breakdown": appliance_breakdown,
-        "shape": {
-            "full": agg_full,
-            "active": agg_active,
-        },
+        "shape": {"full": agg_full, "active": agg_active},
         "stats": {
             "full": shape_stats(agg_full, agg_zone),
             "active": shape_stats(agg_active, agg_zone),
@@ -268,10 +246,58 @@ async def chat(req: ChatRequest):
         "current_plan_label": m["current_plan_label"],
     }
     try:
-        return run_chat(req, site_context)
+        return run_chat(req, site_context, _rank_for, [mm["id"] for mm in SAMPLE_METERS])
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat failed")
         raise HTTPException(500, f"Claude call failed: {exc}")
+
+
+@app.get("/api/readings/{meter_id}")
+async def get_readings(meter_id: str, range: str = "24h"):
+    m = _meter(meter_id)
+    if range not in {"24h", "month", "year"}:
+        raise HTTPException(400, "range must be 24h, month or year")
+    return {"meter_id": meter_id, **synthesize_for_range(m, range)}
+
+
+@app.get("/api/readings-agg")
+async def get_readings_aggregate(ids: str, range: str = "24h"):
+    """Aggregate readings across multiple meter ids."""
+    meter_ids = [x.strip() for x in ids.split(",") if x.strip()]
+    if not meter_ids:
+        raise HTTPException(400, "ids required")
+    if range not in {"24h", "month", "year"}:
+        raise HTTPException(400, "range must be 24h, month or year")
+    per_site = [synthesize_for_range(_meter(mid), range) for mid in meter_ids]
+    if not per_site:
+        return {"meter_ids": meter_ids, "range": range, "points": []}
+    grain = per_site[0]["grain"]
+    # Sum kw_avg / kw_peak / kwh by ts (assumes identical ts series across meters)
+    by_ts: Dict[str, Dict[str, float]] = {}
+    for site in per_site:
+        for p in site["points"]:
+            row = by_ts.setdefault(p["ts"], {"kw_avg": 0.0, "kw_peak": 0.0, "kwh": 0.0})
+            row["kw_avg"] += p["kw_avg"]
+            row["kw_peak"] += p["kw_peak"]
+            row["kwh"] += p["kwh"]
+    points = [{"ts": ts, **{k: round(v, 3) for k, v in row.items()}} for ts, row in sorted(by_ts.items())]
+    return {"meter_ids": meter_ids, "range": range, "grain": grain, "points": points}
+
+
+@app.get("/api/health/supabase")
+async def supabase_health():
+    return {"available": sb.check_available(force=True)}
+
+
+@app.post("/api/scenarios/save")
+async def save_scenario(payload: Dict[str, Any]):
+    saved = sb.save_scenario(payload)
+    return {"ok": bool(saved), "scenario": saved}
+
+
+@app.get("/api/scenarios/{meter_id}")
+async def list_scenarios(meter_id: str):
+    return {"scenarios": sb.list_scenarios(meter_id)}
 
 
 @app.post("/api/refresh-cdr")

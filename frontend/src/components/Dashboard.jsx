@@ -4,8 +4,10 @@ import { api, fmtNumber } from "../lib/api";
 import MeterRail from "./MeterRail";
 import StatStrip from "./StatStrip";
 import LoadCanvas from "./LoadCanvas";
+import HistoricalCanvas from "./HistoricalCanvas";
 import AppliancePanel from "./AppliancePanel";
 import PlanStrip from "./PlanStrip";
+import TimeframeSelector from "./TimeframeSelector";
 
 const APPLIANCE_IDS = [
   "fridges", "espresso", "ovens", "hvac",
