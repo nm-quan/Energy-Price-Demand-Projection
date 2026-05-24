@@ -11,7 +11,7 @@
       "created_at": "2026-05-24T14:31:11.278084+00:00",
       "has_interval_data": true,
       "has_tariff": true,
-      "tariff_id": "tariff-001",
+      "tariff_id": "tariff-003",
       "annual_kwh": 19519.08,
       "annual_cost": 9002.74
     }
@@ -329,7 +329,7 @@
     }
   },
   "client_tariffs": {
-    "client-fcc8ff1a": "tariff-001"
+    "client-fcc8ff1a": "tariff-003"
   },
   "client_scenarios": {
     "client-fcc8ff1a": [
@@ -471,6 +471,151 @@
           "peak_coincidence": 0.0,
           "annual_kwh": 39519.51,
           "avg_daily_kwh": 108.27,
+          "max_demand_month": "January"
+        }
+      },
+      {
+        "timestamp": "2026-05-24T14:33:30.317465+00:00",
+        "baseline_curve": [
+          4.9,
+          4.5,
+          4.2,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          10.2,
+          12.2,
+          14.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          16.7,
+          19.3,
+          20.4,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          7.0,
+          0.0,
+          0.0,
+          4.4
+        ],
+        "shifted_curve": [
+          6.8371,
+          6.4371,
+          13.6371,
+          9.4371,
+          9.4371,
+          9.4371,
+          9.4371,
+          9.4371,
+          9.4371,
+          9.4371,
+          1.9371,
+          1.9371,
+          1.9371,
+          1.9371,
+          0.0,
+          0.0,
+          8.0,
+          8.0,
+          8.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          8.0,
+          3.0,
+          3.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          7.0,
+          0.0,
+          0.0,
+          4.4
+        ],
+        "scenarios_applied": [
+          {
+            "type": "demand_cap",
+            "parameters": {
+              "target_kw": 8.0,
+              "shed_fraction": 0.4
+            },
+            "peak_reduction_kw": 12.4
+          },
+          {
+            "type": "time_shift",
+            "parameters": {
+              "shift_kw": 5.0,
+              "from_start": 30,
+              "from_end": 42,
+              "to_start": 2,
+              "to_end": 10
+            },
+            "peak_reduction_kw": -5.637
+          }
+        ],
+        "savings": {
+          "billing_defensible": {
+            "energy": 575.89,
+            "demand": 1358.51,
+            "total": 1934.4
+          },
+          "indicative": {
+            "contract_low": 100.68,
+            "contract_high": 575.46
+          },
+          "total_low": 2035.08,
+          "total_high": 2509.86
+        },
+        "new_shape_metrics": {
+          "load_factor": 0.2293,
+          "peak_kw": 13.637,
+          "peak_coincidence": 0.04,
+          "annual_kwh": 24790.22,
+          "avg_daily_kwh": 67.92,
           "max_demand_month": "January"
         }
       }
