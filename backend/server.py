@@ -1,59 +1,185 @@
 """
-Load Shape Lab — FastAPI backend.
+Energy Broker API — FastAPI backend.
 
 Endpoints:
-  GET  /api/                       — health
-  GET  /api/meters                 — list pre-loaded sample meters
-  GET  /api/meters/{id}            — meter detail (baseline shape, appliances, shift_assets)
-  GET  /api/plans                  — list retailer plans
-  GET  /api/zones                  — TOU zone metadata
-  GET  /api/spot                   — NEM spot price overlay (48 buckets, $/MWh)
-  POST /api/rank                   — given meter_ids + asset_positions + active_assets,
-                                     return aggregated curves, per-meter shapes, and ranked plans.
-  POST /api/refresh-cdr            — best-effort fetch from AER CDR
+  GET  /api/health
+  POST /api/auth/login
+  GET  /api/auth/me
+
+  GET  /api/clients
+  POST /api/clients
+  GET  /api/clients/{id}
+  POST /api/clients/{id}/upload
+  GET  /api/clients/{id}/intervals/summary
+  PUT  /api/clients/{id}/tariff
+
+  GET  /api/tariffs
+  POST /api/tariffs
+
+  GET  /api/clients/{id}/baseline
+  GET  /api/scenarios/library
+  POST /api/clients/{id}/scenarios/run
+  GET  /api/clients/{id}/report
 """
 from __future__ import annotations
 
-import os
 import logging
-from pathlib import Path
-from typing import List, Dict, Optional
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 
-import httpx
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
 
-from seed_data import (
-    ARCHETYPE_APPLIANCES,
-    NEM_SPOT_AVG_VIC,
-    SAMPLE_METERS,
-    SAMPLE_PLANS,
-    TOU_ZONES,
-    meter_active_shape,
-    meter_appliances,
-    meter_baseline_shape,
+import data_store
+from auth import authenticate_broker, create_token, get_current_broker
+from models import (
+    LoginRequest,
+    Broker,
+    TokenResponse,
+    Client,
+    ClientCreate,
+    IntervalRecord,
+    UploadResponse,
+    IntervalSummary,
+    Tariff,
+    TariffAssign,
+    BaselineResponse,
+    ScenarioRunRequest,
+    ScenarioResult,
+    ReportResponse,
 )
-from cost_engine import annual_cost, shape_stats
-from scenario_chat import ChatRequest, ChatResponse, run_chat
-from historical import synthesize_for_range
-import supabase_client as sb
+from interval_parser import (
+    parse_interval_csv,
+    build_typical_weekday,
+    compute_interval_stats,
+)
+from baseline_engine import compute_baseline
+from scenario_engine import SCENARIO_LIBRARY, run_scenarios
 
-ROOT = Path(__file__).resolve().parent
-load_dotenv(ROOT / ".env")
-
-logger = logging.getLogger("loadshapelab")
+logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
 
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
+# ── Synthetic profiles by site_type (48 half-hourly kW values) ───────────────
 
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+SYNTHETIC_PROFILES: Dict[str, List[float]] = {
+    "cafe": [
+        # midnight → 6am: very low
+        0.8, 0.8, 0.6, 0.6, 0.6, 0.8,
+        # 6am → 9am: morning rush ramp-up
+        2.1, 3.2, 4.1, 4.8,
+        # 9am → 2pm: busy daytime
+        5.2, 5.6, 5.8, 5.6, 5.0, 4.6,
+        # 2pm → 5pm: afternoon shoulder
+        4.2, 4.4, 4.6, 4.8,
+        # 5pm → 8pm: evening peak
+        5.1, 5.4, 5.6, 5.4,
+        # 8pm → 10pm: wind down
+        4.9, 4.2, 3.6,
+        # 10pm → midnight: closing
+        2.8, 2.1, 1.5, 1.2,
+        # pad to 48 buckets
+        1.0, 0.9, 0.8, 0.8, 0.7, 0.7,
+        0.7, 0.7, 0.8, 0.8, 0.8, 0.8,
+        0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
+    ],
+    "office": [
+        # midnight → 7am: base load only
+        1.2, 1.1, 1.0, 0.9, 0.9, 1.0, 1.2,
+        # 7am → 9am: startup
+        2.5, 3.8,
+        # 9am → 12pm: busy morning
+        5.2, 6.1, 6.8, 7.2,
+        # 12pm → 1pm: lunch dip
+        6.5, 6.0,
+        # 1pm → 5pm: afternoon peak
+        6.8, 7.5, 8.1, 8.4, 8.2, 7.9,
+        # 5pm → 7pm: wind down
+        6.5, 5.2,
+        # 7pm → 9pm: after-hours
+        3.1, 2.4,
+        # 9pm → midnight: base
+        1.8, 1.6, 1.5, 1.4,
+        # fill remaining
+        1.3, 1.2, 1.2, 1.2, 1.1, 1.1,
+        1.1, 1.1, 1.2, 1.2, 1.2, 1.2,
+        1.2, 1.2, 1.2, 1.2, 1.2, 1.2,
+    ],
+    "retail": [
+        # midnight → 8am: very low security/HVAC only
+        0.5, 0.4, 0.4, 0.4, 0.4, 0.5, 0.6, 0.8,
+        # 8am → 9am: store opening
+        2.4, 3.2,
+        # 9am → 5pm: full trading
+        4.5, 5.2, 6.1, 6.8, 7.2, 7.5, 7.8, 7.9, 7.5, 7.1,
+        # 5pm → 7pm: extended trading
+        7.8, 8.2, 8.5, 8.1,
+        # 7pm → 9pm: closing
+        6.5, 4.8, 3.2,
+        # 9pm → midnight: security
+        2.1, 1.5, 1.0, 0.8, 0.7,
+        # fill remaining
+        0.6, 0.5, 0.5, 0.5, 0.5, 0.5,
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+    ],
+    "industrial": [
+        # midnight → 6am: night shift reduced
+        8.5, 7.2, 6.8, 6.5, 6.8, 7.2,
+        # 6am → 8am: shift change + ramp up
+        9.5, 12.4,
+        # 8am → 5pm: full production
+        15.8, 18.2, 19.5, 20.1, 20.4, 19.8,
+        20.2, 20.6, 21.0, 21.3, 21.0, 20.5,
+        20.8, 21.2, 21.5,
+        # 5pm → 6pm: handover
+        18.5, 16.2,
+        # 6pm → 10pm: reduced production
+        13.5, 12.1, 11.4, 10.8, 10.5,
+        # 10pm → midnight: night prep
+        9.2, 8.8,
+        # fill remaining
+        8.6, 8.5, 8.5, 8.5, 8.5, 8.5,
+        8.5, 8.5, 8.5, 8.5, 8.5, 8.5,
+        8.5, 8.5, 8.5, 8.5, 8.5, 8.5,
+    ],
+    "hospitality": [
+        # midnight → 5am: overnight base
+        3.2, 2.8, 2.5, 2.4, 2.4, 2.6,
+        # 5am → 8am: breakfast prep
+        4.5, 6.8, 8.2,
+        # 8am → 12pm: full service
+        9.5, 10.8, 11.2, 11.5,
+        # 12pm → 2pm: lunch service peak
+        12.1, 12.8,
+        # 2pm → 5pm: afternoon
+        11.5, 10.8, 10.2,
+        # 5pm → 10pm: dinner service peak
+        11.8, 13.2, 14.5, 15.2, 15.8, 15.5, 14.8, 13.5,
+        # 10pm → midnight: closing
+        10.2, 7.5, 5.8, 4.5,
+        # fill remaining
+        3.8, 3.5, 3.3, 3.2, 3.2, 3.2,
+        3.2, 3.2, 3.2, 3.2, 3.2, 3.2,
+        3.2, 3.2, 3.2, 3.2, 3.2, 3.2,
+    ],
+}
 
-app = FastAPI(title="Load Shape Lab API", version="0.2.0")
+# Ensure all profiles are exactly 48 buckets
+for _st, _prof in SYNTHETIC_PROFILES.items():
+    if len(_prof) < 48:
+        _prof.extend([_prof[-1]] * (48 - len(_prof)))
+    SYNTHETIC_PROFILES[_st] = _prof[:48]
+
+
+def _get_synthetic_profile(site_type: str) -> List[float]:
+    """Return 48-bucket kW profile for a site_type."""
+    profile = SYNTHETIC_PROFILES.get(site_type.lower(), SYNTHETIC_PROFILES["office"])
+    return list(profile)
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Energy Broker API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,258 +190,328 @@ app.add_middleware(
 )
 
 
-# ─── Schemas ─────────────────────────────────────────────────────────────────
-class RankRequest(BaseModel):
-    meter_ids: List[str] = Field(..., min_length=1)
-    appliance_scales: Dict[str, float] = Field(default_factory=dict)
+@app.on_event("startup")
+def startup_event():
+    data_store.load_from_disk()
+    logger.info("Data store loaded on startup")
 
 
-def _meter(meter_id: str) -> dict:
-    m = next((m for m in SAMPLE_METERS if m["id"] == meter_id), None)
-    if not m:
-        raise HTTPException(404, f"Meter {meter_id} not found")
-    return m
+# ── Health ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
 
 
-def _sum_shapes(shapes: List[List[float]]) -> List[float]:
-    if not shapes:
-        return [0.0] * 48
-    out = [0.0] * 48
-    for s in shapes:
-        for i, v in enumerate(s):
-            out[i] += v
-    return [round(v, 4) for v in out]
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    broker = authenticate_broker(req.email, req.password)
+    if broker is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+    token = create_token(broker.id)
+    return {"token": token, "broker": broker.model_dump()}
 
 
-# ─── Routes ──────────────────────────────────────────────────────────────────
-@app.get("/api/")
-async def root():
-    return {"app": "Load Shape Lab", "status": "ok"}
+@app.get("/api/auth/me")
+def get_me(broker: Broker = Depends(get_current_broker)):
+    return broker.model_dump()
 
 
-@app.get("/api/meters")
-async def list_meters():
+# ── Clients ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/clients")
+def list_clients(broker: Broker = Depends(get_current_broker)):
     return [
-        {
-            "id": m["id"], "nmi": m["nmi"], "nickname": m["nickname"],
-            "archetype": m["archetype"], "zone_code": m["zone_code"],
-            "zone_name": m["zone_name"], "state": m["state"],
-            "annual_kwh": m["annual_kwh"],
-            "current_plan_label": m["current_plan_label"],
-            "monthly_spend": m["monthly_spend"],
-        }
-        for m in SAMPLE_METERS
+        c for c in data_store.clients.values()
+        if c.get("broker_id") == broker.id
     ]
 
 
-@app.get("/api/meters/{meter_id}")
-async def get_meter(meter_id: str):
-    m = _meter(meter_id)
-    return {
-        **m,
-        "baseline_shape": meter_baseline_shape(m),
-        "appliances": meter_appliances(m),
+@app.post("/api/clients", status_code=201)
+def create_client(body: ClientCreate, broker: Broker = Depends(get_current_broker)):
+    client_id = f"client-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc).isoformat()
+    client = {
+        "id": client_id,
+        "broker_id": broker.id,
+        "name": body.name,
+        "address": body.address,
+        "nmi": body.nmi,
+        "site_type": body.site_type,
+        "status": "active",
+        "created_at": now,
+        "has_interval_data": False,
+        "has_tariff": False,
+        "tariff_id": None,
+        "annual_kwh": None,
+        "annual_cost": None,
     }
+    data_store.clients[client_id] = client
+    data_store.save_to_disk()
+    return client
 
 
-@app.get("/api/plans")
-async def list_plans(state: Optional[str] = None):
-    if state:
-        return [p for p in SAMPLE_PLANS if p["state"] == state]
-    return SAMPLE_PLANS
+@app.get("/api/clients/{client_id}")
+def get_client(client_id: str, broker: Broker = Depends(get_current_broker)):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return client
 
 
-@app.get("/api/zones")
-async def list_zones():
-    return [
-        {
-            "code": z["code"], "name": name, "state": z["state"],
-            "peak_buckets": z["peak"], "shoulder_buckets": z["shoulder"],
-        }
-        for name, z in TOU_ZONES.items()
-    ]
+# ── Interval data ─────────────────────────────────────────────────────────────
 
+@app.post("/api/clients/{client_id}/upload")
+async def upload_intervals(
+    client_id: str,
+    file: UploadFile = File(...),
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
 
-@app.get("/api/spot")
-async def spot_prices():
-    return {
-        "region": "VIC1",
-        "source": "OpenNEM-style average (existing repo data)",
-        "buckets": 48,
-        "rrp_mwh": NEM_SPOT_AVG_VIC,
-        "rrp_kwh": [round(v / 1000.0, 4) for v in NEM_SPOT_AVG_VIC],
-    }
-
-
-@app.post("/api/rank")
-async def rank_plans(req: RankRequest):
-    return _rank_for(req.meter_ids, req.appliance_scales)
-
-
-def _rank_for(meter_ids: List[str], appliance_scales: Dict[str, float]) -> Dict[str, Any]:
-    """Pure helper — same logic as POST /api/rank but invokable from Python (used by Claude tool-use)."""
-    meters = [_meter(mid) for mid in meter_ids]
-    appliance_template = ARCHETYPE_APPLIANCES.get(meters[0]["archetype"], [])
-    appliance_order = [a["id"] for a in appliance_template]
-    appliance_meta = {a["id"]: a for a in appliance_template}
-
-    per_appliance_profiles: Dict[str, List[float]] = {aid: [0.0] * 48 for aid in appliance_order}
-    for m in meters:
-        for a in meter_appliances(m):
-            for i, v in enumerate(a["profile"]):
-                per_appliance_profiles[a["id"]][i] += v
-
-    scales = {aid: float(appliance_scales.get(aid, 1.0)) for aid in appliance_order}
-
-    per_meter, full_shapes, active_shapes = [], [], []
-    for m in meters:
-        full = meter_baseline_shape(m)
-        active_s = meter_active_shape(m, scales)
-        full_shapes.append(full)
-        active_shapes.append(active_s)
-        per_meter.append({"meter_id": m["id"], "zone_code": m["zone_code"],
-                          "full_shape": full, "active_shape": active_s})
-
-    agg_full = _sum_shapes(full_shapes)
-    agg_active = _sum_shapes(active_shapes)
-
-    appliance_breakdown = []
-    for aid in appliance_order:
-        meta = appliance_meta[aid]
-        scale = scales[aid]
-        prof = [round(v * scale, 4) for v in per_appliance_profiles[aid]]
-        appliance_breakdown.append({
-            "id": aid, "name": meta["name"], "color": meta["color"],
-            "always_on": meta.get("always_on", False), "note": meta.get("note", ""),
-            "profile": prof, "daily_kwh": round(sum(prof) * 0.5, 2),
-            "scale": scale, "active": scale > 0,
-        })
-
-    ranked = []
-    for plan in SAMPLE_PLANS:
-        sum_full = sum_active = 0.0
-        for pm, m in zip(per_meter, meters):
-            sum_full += annual_cost(pm["full_shape"], plan, m["zone_code"])["annual_total"]
-            sum_active += annual_cost(pm["active_shape"], plan, m["zone_code"])["annual_total"]
-        ranked.append({
-            "plan": plan,
-            "baseline_cost": round(sum_full, 2),
-            "shifted_cost": round(sum_active, 2),
-            "annual_delta": round(sum_active - sum_full, 2),
-            "pct_delta": round((sum_active - sum_full) / max(sum_full, 1e-9) * 100.0, 2),
-        })
-    ranked.sort(key=lambda r: r["shifted_cost"])
-
-    current_plan_id = meters[0]["current_plan_id"]
-    current = next((r for r in ranked if r["plan"]["id"] == current_plan_id), ranked[0])
-    best = ranked[0]
-    achievable_saving = round(current["shifted_cost"] - best["shifted_cost"], 2)
-    agg_zone = max(
-        {m["zone_code"] for m in meters},
-        key=lambda z: sum(1 for m in meters if m["zone_code"] == z),
-    )
-
-    return {
-        "meter_ids": meter_ids,
-        "n_sites": len(meters),
-        "appliance_scales": scales,
-        "appliance_breakdown": appliance_breakdown,
-        "shape": {"full": agg_full, "active": agg_active},
-        "stats": {
-            "full": shape_stats(agg_full, agg_zone),
-            "active": shape_stats(agg_active, agg_zone),
-        },
-        "ranked": ranked,
-        "current_plan_id": current_plan_id,
-        "current": current,
-        "best": best,
-        "achievable_saving": achievable_saving,
-        "agg_zone": agg_zone,
-    }
-
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    m = _meter(req.meter_id)
-    site_context = {
-        "nickname": m["nickname"],
-        "nmi": m["nmi"],
-        "state": m["state"],
-        "zone_name": m["zone_name"],
-        "annual_kwh": m["annual_kwh"],
-        "current_plan_label": m["current_plan_label"],
-    }
+    content = await file.read()
     try:
-        return run_chat(req, site_context, _rank_for, [mm["id"] for mm in SAMPLE_METERS])
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("chat failed")
-        raise HTTPException(500, f"Claude call failed: {exc}")
+        intervals = parse_interval_csv(content)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to parse CSV: {exc}")
+
+    if not intervals:
+        raise HTTPException(status_code=422, detail="No valid interval records found in CSV")
+
+    stats = compute_interval_stats(intervals)
+
+    data_store.interval_data[client_id] = intervals
+    client["has_interval_data"] = True
+    client["annual_kwh"] = stats["annual_kwh"]
+    data_store.clients[client_id] = client
+    data_store.save_to_disk()
+
+    return {
+        "success": True,
+        "intervals_count": len(intervals),
+        "date_range": stats["date_range"],
+        "annual_kwh": stats["annual_kwh"],
+        "peak_kw": stats["peak_kw"],
+    }
 
 
-@app.get("/api/readings/{meter_id}")
-async def get_readings(meter_id: str, range: str = "24h"):
-    m = _meter(meter_id)
-    if range not in {"24h", "month", "year"}:
-        raise HTTPException(400, "range must be 24h, month or year")
-    return {"meter_id": meter_id, **synthesize_for_range(m, range)}
+@app.get("/api/clients/{client_id}/intervals/summary")
+def intervals_summary(
+    client_id: str,
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    intervals = data_store.interval_data.get(client_id)
+    if not intervals:
+        raise HTTPException(status_code=404, detail="No interval data uploaded for this client")
+
+    stats = compute_interval_stats(intervals)
+    typical_weekday = build_typical_weekday(intervals)
+
+    return {
+        "date_range": stats["date_range"],
+        "annual_kwh": stats["annual_kwh"],
+        "peak_kw": stats["peak_kw"],
+        "load_factor": stats["load_factor"],
+        "typical_weekday": typical_weekday,
+    }
 
 
-@app.get("/api/readings-agg")
-async def get_readings_aggregate(ids: str, range: str = "24h"):
-    """Aggregate readings across multiple meter ids."""
-    meter_ids = [x.strip() for x in ids.split(",") if x.strip()]
-    if not meter_ids:
-        raise HTTPException(400, "ids required")
-    if range not in {"24h", "month", "year"}:
-        raise HTTPException(400, "range must be 24h, month or year")
-    per_site = [synthesize_for_range(_meter(mid), range) for mid in meter_ids]
-    if not per_site:
-        return {"meter_ids": meter_ids, "range": range, "points": []}
-    grain = per_site[0]["grain"]
-    # Sum kw_avg / kw_peak / kwh by ts (assumes identical ts series across meters)
-    by_ts: Dict[str, Dict[str, float]] = {}
-    for site in per_site:
-        for p in site["points"]:
-            row = by_ts.setdefault(p["ts"], {"kw_avg": 0.0, "kw_peak": 0.0, "kwh": 0.0})
-            row["kw_avg"] += p["kw_avg"]
-            row["kw_peak"] += p["kw_peak"]
-            row["kwh"] += p["kwh"]
-    points = [{"ts": ts, **{k: round(v, 3) for k, v in row.items()}} for ts, row in sorted(by_ts.items())]
-    return {"meter_ids": meter_ids, "range": range, "grain": grain, "points": points}
+# ── Tariff assignment ─────────────────────────────────────────────────────────
+
+@app.put("/api/clients/{client_id}/tariff")
+def assign_tariff(
+    client_id: str,
+    body: TariffAssign,
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    if body.tariff_id not in data_store.tariffs:
+        raise HTTPException(status_code=404, detail="Tariff not found")
+
+    data_store.client_tariffs[client_id] = body.tariff_id
+    client["has_tariff"] = True
+    client["tariff_id"] = body.tariff_id
+    data_store.clients[client_id] = client
+    data_store.save_to_disk()
+    return {"success": True}
 
 
-@app.get("/api/health/supabase")
-async def supabase_health():
-    return {"available": sb.check_available(force=True)}
+# ── Tariffs ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/tariffs")
+def list_tariffs(broker: Broker = Depends(get_current_broker)):
+    return list(data_store.tariffs.values())
 
 
-@app.post("/api/scenarios/save")
-async def save_scenario(payload: Dict[str, Any]):
-    saved = sb.save_scenario(payload)
-    return {"ok": bool(saved), "scenario": saved}
+@app.post("/api/tariffs", status_code=201)
+def create_tariff(body: Tariff, broker: Broker = Depends(get_current_broker)):
+    # Generate ID if not provided or if it conflicts
+    if not body.id or body.id in data_store.tariffs:
+        body = body.model_copy(update={"id": f"tariff-{uuid.uuid4().hex[:8]}"})
+    data_store.tariffs[body.id] = body.model_dump()
+    data_store.save_to_disk()
+    return body.model_dump()
 
 
-@app.get("/api/scenarios/{meter_id}")
-async def list_scenarios(meter_id: str):
-    return {"scenarios": sb.list_scenarios(meter_id)}
+# ── Baseline ──────────────────────────────────────────────────────────────────
+
+def _get_client_load_curve(client_id: str, client: dict) -> tuple[List[float], float]:
+    """
+    Return (load_curve_kw, annual_kwh) for a client.
+    Uses real interval data if available, else synthetic profile.
+    """
+    intervals = data_store.interval_data.get(client_id)
+    if intervals:
+        load_curve = build_typical_weekday(intervals)
+        stats = compute_interval_stats(intervals)
+        annual_kwh = stats["annual_kwh"]
+    else:
+        # Synthetic profile
+        load_curve = _get_synthetic_profile(client.get("site_type", "office"))
+        # Estimate annual consumption from synthetic profile
+        daily_kwh = sum(v * 0.5 for v in load_curve)
+        annual_kwh = daily_kwh * 365.0
+
+    return load_curve, annual_kwh
 
 
-@app.post("/api/refresh-cdr")
-async def refresh_cdr():
-    """Best-effort live fetch from AER CDR — reports status only."""
-    retailers = ["agl", "originenergy", "energyaustralia", "redenergy", "alintaenergy"]
-    base = "https://cdr.energymadeeasy.gov.au"
-    headers = {"x-v": "3", "Accept": "application/json"}
-    results = {}
-    async with httpx.AsyncClient(timeout=15.0, headers=headers) as cli:
-        for r in retailers:
-            try:
-                resp = await cli.get(f"{base}/{r}/cds-au/v1/energy/plans?page-size=10")
-                if resp.status_code == 200:
-                    plans = resp.json().get("data", {}).get("plans", [])
-                    results[r] = {"status": "ok", "count": len(plans)}
-                else:
-                    results[r] = {"status": "http_error", "code": resp.status_code}
-            except Exception as exc:  # noqa: BLE001
-                results[r] = {"status": "exception", "detail": str(exc)}
-    return {"queried": retailers, "results": results}
+def _get_client_tariff(client_id: str) -> Optional[Tariff]:
+    """Return Tariff object for a client, or None."""
+    tariff_id = data_store.client_tariffs.get(client_id)
+    if tariff_id is None:
+        tariff_id = data_store.clients.get(client_id, {}).get("tariff_id")
+    if tariff_id is None:
+        return None
+    tariff_data = data_store.tariffs.get(tariff_id)
+    if tariff_data is None:
+        return None
+    return Tariff(**tariff_data)
+
+
+@app.get("/api/clients/{client_id}/baseline")
+def get_baseline(
+    client_id: str,
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    tariff = _get_client_tariff(client_id)
+    if tariff is None:
+        # Use first available tariff as default for demo purposes
+        if data_store.tariffs:
+            first_tariff_data = next(iter(data_store.tariffs.values()))
+            tariff = Tariff(**first_tariff_data)
+        else:
+            raise HTTPException(status_code=404, detail="No tariff assigned to this client")
+
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+
+    result = compute_baseline(load_curve, tariff, annual_kwh)
+
+    # Update client annual_cost
+    client["annual_cost"] = result["cost_stack"]["total_annual"]
+    if not client.get("annual_kwh"):
+        client["annual_kwh"] = annual_kwh
+    data_store.clients[client_id] = client
+    data_store.save_to_disk()
+
+    return result
+
+
+# ── Scenarios ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/scenarios/library")
+def get_scenario_library(broker: Broker = Depends(get_current_broker)):
+    return SCENARIO_LIBRARY
+
+
+@app.post("/api/clients/{client_id}/scenarios/run")
+def run_client_scenarios(
+    client_id: str,
+    body: ScenarioRunRequest,
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    tariff = _get_client_tariff(client_id)
+    if tariff is None:
+        if data_store.tariffs:
+            first_tariff_data = next(iter(data_store.tariffs.values()))
+            tariff = Tariff(**first_tariff_data)
+        else:
+            raise HTTPException(status_code=404, detail="No tariff assigned to this client")
+
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+
+    scenarios_config = [
+        {"type": s.type, "parameters": s.parameters}
+        for s in body.scenarios
+    ]
+
+    result = run_scenarios(load_curve, scenarios_config, tariff, annual_kwh)
+
+    # Store the result
+    if client_id not in data_store.client_scenarios:
+        data_store.client_scenarios[client_id] = []
+    data_store.client_scenarios[client_id].append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **result,
+    })
+    data_store.save_to_disk()
+
+    return result
+
+
+# ── Report ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/clients/{client_id}/report")
+def get_report(
+    client_id: str,
+    broker: Broker = Depends(get_current_broker),
+):
+    client = data_store.clients.get(client_id)
+    if client is None or client.get("broker_id") != broker.id:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    tariff = _get_client_tariff(client_id)
+    if tariff is None and data_store.tariffs:
+        first_tariff_data = next(iter(data_store.tariffs.values()))
+        tariff = Tariff(**first_tariff_data)
+
+    baseline_data = None
+    if tariff:
+        load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+        baseline_data = compute_baseline(load_curve, tariff, annual_kwh)
+
+    scenarios_list = data_store.client_scenarios.get(client_id, [])
+    latest_scenario = scenarios_list[-1] if scenarios_list else None
+
+    return {
+        "client": {
+            "name": client.get("name"),
+            "address": client.get("address"),
+            "nmi": client.get("nmi"),
+        },
+        "baseline": baseline_data,
+        "scenarios": scenarios_list,
+        "savings": latest_scenario.get("savings") if latest_scenario else None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
