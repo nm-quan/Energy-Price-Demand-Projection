@@ -32,10 +32,9 @@ from seed_data import (
     SAMPLE_METERS,
     SAMPLE_PLANS,
     TOU_ZONES,
+    meter_active_shape,
     meter_appliances,
     meter_baseline_shape,
-    meter_shift_assets,
-    shifted_shape,
 )
 from cost_engine import annual_cost, shape_stats
 
@@ -65,8 +64,7 @@ app.add_middleware(
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 class RankRequest(BaseModel):
     meter_ids: List[str] = Field(..., min_length=1)
-    asset_positions: Dict[str, int] = Field(default_factory=dict)
-    active_assets: List[str] = Field(default_factory=list)
+    active_appliances: List[str] = Field(default_factory=list)
 
 
 def _meter(meter_id: str) -> dict:
@@ -114,7 +112,6 @@ async def get_meter(meter_id: str):
         **m,
         "baseline_shape": meter_baseline_shape(m),
         "appliances": meter_appliances(m),
-        "shift_assets": meter_shift_assets(m),
     }
 
 
@@ -151,50 +148,82 @@ async def spot_prices():
 async def rank_plans(req: RankRequest):
     meters = [_meter(mid) for mid in req.meter_ids]
 
-    # Per-meter shapes
-    per_meter = []
+    # Build appliance breakdown — aggregated across selected meters.
+    # We always show ALL 8 appliances in the breakdown (even if toggled off the
+    # frontend uses this to render the stacked chart for the active subset).
+    appliance_template = ARCHETYPE_APPLIANCES.get(meters[0]["archetype"], [])
+    appliance_order = [a["id"] for a in appliance_template]
+
+    per_appliance_profiles: Dict[str, List[float]] = {aid: [0.0] * 48 for aid in appliance_order}
+    appliance_meta: Dict[str, Dict] = {a["id"]: a for a in appliance_template}
+
     for m in meters:
-        baseline = meter_baseline_shape(m)
-        shifted = shifted_shape(m, req.asset_positions, req.active_assets)
+        for a in meter_appliances(m):
+            for i, v in enumerate(a["profile"]):
+                per_appliance_profiles[a["id"]][i] += v
+
+    # Determine which appliances are active (default: all on if list empty)
+    active = list(req.active_appliances) if req.active_appliances else appliance_order
+
+    # Build per-meter shapes (active and full)
+    per_meter = []
+    full_shapes: List[List[float]] = []
+    active_shapes: List[List[float]] = []
+    for m in meters:
+        full = meter_baseline_shape(m)
+        active_s = meter_active_shape(m, active)
+        full_shapes.append(full)
+        active_shapes.append(active_s)
         per_meter.append({
             "meter_id": m["id"],
             "zone_code": m["zone_code"],
-            "baseline_shape": baseline,
-            "shifted_shape": shifted,
+            "full_shape": full,
+            "active_shape": active_s,
         })
 
-    agg_baseline = _sum_shapes([pm["baseline_shape"] for pm in per_meter])
-    agg_shifted = _sum_shapes([pm["shifted_shape"] for pm in per_meter])
+    agg_full = _sum_shapes(full_shapes)
+    agg_active = _sum_shapes(active_shapes)
 
-    # Rank plans by SUM of per-meter cost
+    appliance_breakdown = []
+    for aid in appliance_order:
+        meta = appliance_meta[aid]
+        prof = [round(v, 4) for v in per_appliance_profiles[aid]]
+        appliance_breakdown.append({
+            "id": aid,
+            "name": meta["name"],
+            "color": meta["color"],
+            "always_on": meta.get("always_on", False),
+            "note": meta.get("note", ""),
+            "profile": prof,
+            "daily_kwh": round(sum(prof) * 0.5, 2),
+            "active": aid in active,
+        })
+
+    # Rank plans by sum of per-meter cost on each meter's distribution zone,
+    # using the active shape.
     ranked = []
     for plan in SAMPLE_PLANS:
-        sum_base = 0.0
-        sum_shift = 0.0
+        sum_full = 0.0
+        sum_active = 0.0
         for pm, m in zip(per_meter, meters):
-            base_b = annual_cost(pm["baseline_shape"], plan, m["zone_code"])
-            shift_b = annual_cost(pm["shifted_shape"], plan, m["zone_code"])
-            sum_base += base_b["annual_total"]
-            sum_shift += shift_b["annual_total"]
+            sum_full += annual_cost(pm["full_shape"], plan, m["zone_code"])["annual_total"]
+            sum_active += annual_cost(pm["active_shape"], plan, m["zone_code"])["annual_total"]
         ranked.append({
             "plan": plan,
-            "baseline_cost": round(sum_base, 2),
-            "shifted_cost": round(sum_shift, 2),
-            "annual_delta": round(sum_shift - sum_base, 2),
+            "baseline_cost": round(sum_full, 2),
+            "shifted_cost": round(sum_active, 2),
+            "annual_delta": round(sum_active - sum_full, 2),
             "pct_delta": round(
-                (sum_shift - sum_base) / max(sum_base, 1e-9) * 100.0, 2
+                (sum_active - sum_full) / max(sum_full, 1e-9) * 100.0, 2
             ),
         })
     ranked.sort(key=lambda r: r["shifted_cost"])
 
-    # Pick a representative "current" — first meter's current plan (most natural
-    # in single-select; for multi we report the same plan id and use sum cost)
     current_plan_id = meters[0]["current_plan_id"]
     current = next((r for r in ranked if r["plan"]["id"] == current_plan_id), ranked[0])
     best = ranked[0]
     achievable_saving = round(current["shifted_cost"] - best["shifted_cost"], 2)
 
-    # Aggregated stats — use the most common zone for TOU-band classification of the agg curve
     agg_zone = max(
         {m["zone_code"] for m in meters},
         key=lambda z: sum(1 for m in meters if m["zone_code"] == z),
@@ -203,20 +232,21 @@ async def rank_plans(req: RankRequest):
     return {
         "meter_ids": req.meter_ids,
         "n_sites": len(meters),
+        "active_appliances": active,
+        "appliance_breakdown": appliance_breakdown,
+        "shape": {
+            "full": agg_full,
+            "active": agg_active,
+        },
+        "stats": {
+            "full": shape_stats(agg_full, agg_zone),
+            "active": shape_stats(agg_active, agg_zone),
+        },
         "ranked": ranked,
         "current_plan_id": current_plan_id,
         "current": current,
         "best": best,
         "achievable_saving": achievable_saving,
-        "shape": {
-            "baseline": agg_baseline,
-            "shifted": agg_shifted,
-        },
-        "stats": {
-            "baseline": shape_stats(agg_baseline, agg_zone),
-            "shifted": shape_stats(agg_shifted, agg_zone),
-        },
-        "per_meter": per_meter,
         "agg_zone": agg_zone,
     }
 

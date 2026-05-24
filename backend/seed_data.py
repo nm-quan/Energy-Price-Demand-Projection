@@ -120,70 +120,66 @@ CAFE_APPLIANCES: List[Dict[str, Any]] = [
     {
         "id": "fridges",
         "name": "Fridges (3 units)",
-        "shiftable": False,
+        "color": "#64748b",
         "profile": _FRIDGES,
-        "note": "Continuous baseline 24/7 · cannot be shifted",
+        "always_on": True,
+        "note": "Continuous baseline 24/7 — refrigeration cannot be switched off",
     },
     {
         "id": "espresso",
         "name": "Espresso machine",
-        "shiftable": False,
+        "color": "#f59e0b",
         "profile": _ESPRESSO,
+        "always_on": False,
         "note": "Idle then spikes during service",
     },
     {
         "id": "ovens",
         "name": "Ovens",
-        "shiftable": False,
+        "color": "#dc2626",
         "profile": _OVENS,
-        "note": "On during food prep 7:30–14:00",
+        "always_on": False,
+        "note": "On during food prep 07:30–14:00",
     },
     {
         "id": "hvac",
         "name": "HVAC",
-        "shiftable": True,
+        "color": "#0ea5e9",
         "profile": _HVAC,
-        "feasibility": "medium",
-        "hardware_cost": 350,
-        "note": "Pre-cool before peak window with a smart thermostat",
-        # The shift block represents the slice of HVAC load the user is choosing
-        # to pre-cool — defaults to sit on top of the midday peak (12:00–14:00)
-        # so dragging earlier visibly relieves the peak.
-        "block": {"start": 24, "duration": 4, "power": 2.0},
+        "always_on": False,
+        "note": "Cooling tracks midday peak 09:00–17:00",
     },
     {
         "id": "lighting",
         "name": "Lighting",
-        "shiftable": False,
+        "color": "#eab308",
         "profile": _LIGHTING,
+        "always_on": False,
         "note": "Tied to trading hours",
     },
     {
         "id": "dishwasher",
-        "name": "Dishwasher cycle",
-        "shiftable": True,
+        "name": "Dishwasher",
+        "color": "#10b981",
         "profile": _DISHWASHER,
-        "feasibility": "easy",
-        "hardware_cost": 50,
-        "note": "Timer-controlled commercial dishwasher — end of service",
-        "block": {"start": 33, "duration": 2, "power": 3.0},
+        "always_on": False,
+        "note": "Timer-controlled cycle 16:30–17:30",
     },
     {
         "id": "hot-water",
         "name": "Hot water tank",
-        "shiftable": True,
+        "color": "#8b5cf6",
         "profile": _HOT_WATER,
-        "feasibility": "easy",
-        "hardware_cost": 80,
-        "note": "Tank reheat — must finish by 06:00 for breakfast",
-        "block": {"start": 0, "duration": 8, "power": 2.4},
+        "always_on": False,
+        "note": "Overnight reheat 23:30–04:00",
     },
     {
         "id": "misc",
         "name": "Misc (POS, fans)",
-        "shiftable": False,
+        "color": "#ec4899",
         "profile": _MISC,
-        "note": "Always on while trading",
+        "always_on": False,
+        "note": "Always-on when trading",
     },
 ]
 
@@ -333,11 +329,15 @@ def meter_appliances(meter: Dict[str, Any]) -> List[Dict[str, Any]]:
     out = []
     for a in apps:
         scaled_profile = [round(v * k, 4) for v in a["profile"]]
-        scaled_block: Optional[Dict[str, Any]] = None
-        if a.get("block"):
-            b = a["block"]
-            scaled_block = {**b, "power": round(b["power"] * k, 4)}
-        out.append({**a, "profile": scaled_profile, "block": scaled_block})
+        out.append({
+            "id": a["id"],
+            "name": a["name"],
+            "color": a["color"],
+            "always_on": a.get("always_on", False),
+            "note": a.get("note", ""),
+            "profile": scaled_profile,
+            "daily_kwh": round(sum(scaled_profile) * 0.5, 2),
+        })
     return out
 
 
@@ -350,44 +350,13 @@ def meter_baseline_shape(meter: Dict[str, Any]) -> List[float]:
     return [round(v, 4) for v in out]
 
 
-def shifted_shape(meter: Dict[str, Any], asset_positions: Dict[str, int],
-                  active_assets: List[str]) -> List[float]:
-    """Compute the shape after applying user shifts (signed; may go negative)."""
+def meter_active_shape(meter: Dict[str, Any], active_appliances: List[str]) -> List[float]:
+    """Shape with only the active (toggled-on) appliances summed."""
     apps = meter_appliances(meter)
-    shape = meter_baseline_shape(meter)
+    out = [0.0] * 48
     for a in apps:
-        if not a.get("shiftable") or not a.get("block"):
+        if a["id"] not in active_appliances:
             continue
-        if a["id"] not in active_assets:
-            continue
-        new_start = asset_positions.get(a["id"], a["block"]["start"])
-        if new_start == a["block"]["start"]:
-            continue
-        power = a["block"]["power"]
-        duration = a["block"]["duration"]
-        for i in range(a["block"]["start"], a["block"]["start"] + duration):
-            if 0 <= i < 48:
-                shape[i] -= power
-        for i in range(new_start, new_start + duration):
-            if 0 <= i < 48:
-                shape[i] += power
-    return [round(v, 4) for v in shape]
-
-
-def meter_shift_assets(meter: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Return UI-shaped shift_assets for a meter — derived from shiftable appliances."""
-    out = []
-    for a in meter_appliances(meter):
-        if not a.get("shiftable") or not a.get("block"):
-            continue
-        out.append({
-            "id": a["id"],
-            "label": a["name"],
-            "power": a["block"]["power"],
-            "duration": a["block"]["duration"],
-            "default_start": a["block"]["start"],
-            "feasibility": a.get("feasibility", "medium"),
-            "hardware_cost": a.get("hardware_cost", 0),
-            "note": a.get("note", ""),
-        })
-    return out
+        for i, v in enumerate(a["profile"]):
+            out[i] += v
+    return [round(v, 4) for v in out]
