@@ -30,6 +30,15 @@ A web app where a business owner sees their current energy load shape rendered a
 - **Storage**: MongoDB available but unused — data is in-process.
 
 ## Implemented (latest)
+- [x] **Page 2: Scenario Builder (Claude Haiku 4.5)** — chat-style conversation with live profile extraction.
+  - Backend `/api/chat` endpoint using `anthropic` SDK + `claude-haiku-4-5` model
+  - System prompt instructs Claude to return `{assistant_message, profile_delta}` JSON
+  - Profile fields: business_type, hours, sites, major_loads, shiftable, fixed, capex_budget, constraints (each with `value` + `confidence`)
+  - Frontend: 60/40 split chat + profile pane, dark forest user bubbles, slate Claude bubbles, prompt suggestion chips, pre-loaded first message
+  - Live profile pane: inline ✎ edit on every field, confidence dots (green/amber/grey)
+  - "Run Optimisation →" button (Termina lime) auto-enables when hours+major_loads+capex_budget filled. Calls `/api/rank` and renders a lime result card with recommended plan, annual cost + saving, peak demand
+- [x] **Page navigation dropdown** in the sidebar (PageSwitcher.jsx) — clean dark-teal styled dropdown listing "Load Dashboard" and "Scenario Builder" with hint text.
+- [x] Sidebar + header unified in `bg-forest` for a single nav surface.
 - [x] 10-site cafe chain portfolio across VIC / NSW / QLD / SA distribution zones.
 - [x] **Appliance-level load decomposition** — total = sum of 8 appliances (fridges always-on, then espresso, ovens, HVAC, lighting, dishwasher, hot-water, misc).
 - [x] **Stacked area chart** with 8 distinct colors, clean dashed gridlines, hover tooltip showing per-appliance kW + total at the hovered bucket.
