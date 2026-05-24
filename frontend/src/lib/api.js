@@ -1,29 +1,61 @@
-import axios from "axios";
+import axios from 'axios';
+import { getToken } from './auth';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-export const API = `${BACKEND_URL}/api`;
-
-export const api = axios.create({
-  baseURL: API,
-  timeout: 15000,
+const api = axios.create({
+  baseURL: 'http://localhost:8001',
+  timeout: 30000,
 });
 
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export const login = (email, password) => api.post('/api/auth/login', { email, password });
+export const getMe = () => api.get('/api/auth/me');
+
+export const getClients = () => api.get('/api/clients');
+export const createClient = (data) => api.post('/api/clients', data);
+export const getClient = (id) => api.get(`/api/clients/${id}`);
+
+export const uploadIntervalData = (id, file) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post(`/api/clients/${id}/upload`, fd);
+};
+export const getIntervalSummary = (id) => api.get(`/api/clients/${id}/intervals/summary`);
+
+export const getTariffs = () => api.get('/api/tariffs');
+export const createTariff = (data) => api.post('/api/tariffs', data);
+export const setClientTariff = (id, tariffId) => api.put(`/api/clients/${id}/tariff`, { tariff_id: tariffId });
+
+export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
+
+export const getScenarioLibrary = () => api.get('/api/scenarios/library');
+export const runScenarios = (id, scenarios) => api.post(`/api/clients/${id}/scenarios/run`, { scenarios });
+
+export const getReport = (id) => api.get(`/api/clients/${id}/report`);
+
+// Formatters
 export const fmtCurrency = (n) =>
-  new Intl.NumberFormat("en-AU", {
-    style: "currency",
-    currency: "AUD",
+  new Intl.NumberFormat('en-AU', {
+    style: 'currency',
+    currency: 'AUD',
     maximumFractionDigits: 0,
   }).format(n ?? 0);
 
 export const fmtNumber = (n, digits = 1) =>
-  new Intl.NumberFormat("en-AU", {
+  new Intl.NumberFormat('en-AU', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(n ?? 0);
 
 export const fmtPct = (n, digits = 0) =>
-  new Intl.NumberFormat("en-AU", {
-    style: "percent",
+  new Intl.NumberFormat('en-AU', {
+    style: 'percent',
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(n ?? 0);
@@ -31,5 +63,7 @@ export const fmtPct = (n, digits = 0) =>
 export const bucketToTime = (b) => {
   const h = Math.floor(b / 2);
   const m = (b % 2) * 30;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 };
+
+export default api;
