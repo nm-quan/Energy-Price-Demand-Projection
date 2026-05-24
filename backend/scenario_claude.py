@@ -482,8 +482,8 @@ def generate_scenarios(
     avoid_themes: List[str] = []
     scenarios: List[Dict[str, Any]] = []
 
-    # Generate in parallel
-    with ThreadPoolExecutor(max_workers=min(count, 5)) as pool:
+    # Generate in parallel (cap workers at 2 to stay under Anthropic 30k tokens/min rate limit)
+    with ThreadPoolExecutor(max_workers=min(count, 2)) as pool:
         futures = {
             pool.submit(
                 _generate_one,

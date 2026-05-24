@@ -154,3 +154,75 @@ def _seed_tariffs() -> None:
     for t in RETAILER_TARIFFS:
         tariffs[t["id"]] = t
     logger.info("Seeded %d retailer tariffs", len(tariffs))
+
+
+# ── Demo client (synthetic cafe with 17,520 half-hourly intervals) ──────────
+
+import math
+import random
+from datetime import datetime, timedelta, timezone
+
+_CAFE_PROFILE = [
+    0.8, 0.8, 0.6, 0.6, 0.6, 0.8,
+    2.1, 3.2, 4.1, 4.8,
+    5.2, 5.6, 5.8, 5.6, 5.0, 4.6,
+    4.2, 4.4, 4.6, 4.8,
+    5.1, 5.4, 5.6, 5.4,
+    4.9, 4.2, 3.6,
+    2.8, 2.1, 1.5, 1.2,
+    1.0, 0.9, 0.8, 0.8, 0.7, 0.7,
+    0.7, 0.7, 0.8, 0.8, 0.8, 0.8,
+    0.8, 0.8, 0.8, 0.8, 0.8,
+]
+_CAFE_PROFILE = (_CAFE_PROFILE + [_CAFE_PROFILE[-1]] * 48)[:48]
+
+
+def _generate_synthetic_intervals(start_year: int = 2024) -> list:
+    rng = random.Random(42)
+    profile = _CAFE_PROFILE
+    records: list = []
+    start = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    for day in range(365):
+        day_date = start + timedelta(days=day)
+        season_phase = math.cos(2 * math.pi * day / 365.0)
+        seasonal_mult = 1.0 + 0.20 * season_phase
+        daily_mult = 1.0 + rng.uniform(-0.15, 0.15)
+        wd_mult = 1.05 if day_date.weekday() >= 5 else 1.0
+        day_mult = seasonal_mult * daily_mult * wd_mult
+        for bucket in range(48):
+            kw = profile[bucket] * day_mult
+            kwh = kw * 0.5
+            ts = day_date + timedelta(minutes=30 * bucket)
+            records.append({"timestamp": ts.isoformat(), "kwh": round(max(kwh, 0.0), 4)})
+    return records
+
+
+def seed_demo_client() -> None:
+    """Seed a fully built-out demo client with interval data and tariff.
+    Does NOT seed any scenarios or reports — those start empty.
+    Idempotent: skips if demo client already exists.
+    """
+    demo_id = "client-demo-001"
+    if demo_id in clients:
+        return
+
+    intervals = _generate_synthetic_intervals(start_year=2024)
+    interval_data[demo_id] = intervals
+
+    clients[demo_id] = {
+        "id": demo_id,
+        "name": "Brunswick East Cafe",
+        "address": "142 Lygon St, Brunswick East VIC 3057",
+        "nmi": "6305987412",
+        "site_type": "cafe",
+        "status": "active",
+        "created_at": "2026-01-15T09:00:00+00:00",
+        "has_interval_data": True,
+        "has_tariff": True,
+        "tariff_id": "tariff-agl-tou-vic",
+        "annual_kwh": 24800.0,
+        "annual_cost": None,
+    }
+    client_tariffs[demo_id] = "tariff-agl-tou-vic"
+    save_to_disk()
+    logger.info("Seeded demo client %s with %d intervals", demo_id, len(intervals))

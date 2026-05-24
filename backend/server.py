@@ -147,6 +147,9 @@ app.add_middleware(
 @app.on_event("startup")
 def startup_event():
     data_store.load_from_disk()
+    if not data_store.clients:
+        logger.info("No clients found — seeding synthetic demo client")
+        data_store.seed_demo_client()
     logger.info("Data store loaded — %d clients, %d tariffs, %d scenarios, %d reports",
                 len(data_store.clients), len(data_store.tariffs),
                 len(data_store.scenarios), len(data_store.reports))
