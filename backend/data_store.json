@@ -9,14 +9,81 @@
       "site_type": "cafe",
       "status": "active",
       "created_at": "2026-05-24T14:31:11.278084+00:00",
-      "has_interval_data": false,
+      "has_interval_data": true,
       "has_tariff": true,
       "tariff_id": "tariff-001",
-      "annual_kwh": 22538.749999999996,
+      "annual_kwh": 19519.08,
       "annual_cost": 9002.74
     }
   },
-  "interval_data": {},
+  "interval_data": {
+    "client-fcc8ff1a": [
+      {
+        "timestamp": "2024-01-01T00:00:00",
+        "kwh": 2.5
+      },
+      {
+        "timestamp": "2024-01-01T00:30:00",
+        "kwh": 2.3
+      },
+      {
+        "timestamp": "2024-01-01T01:00:00",
+        "kwh": 2.1
+      },
+      {
+        "timestamp": "2024-01-01T08:00:00",
+        "kwh": 5.2
+      },
+      {
+        "timestamp": "2024-01-01T08:30:00",
+        "kwh": 6.1
+      },
+      {
+        "timestamp": "2024-01-01T09:00:00",
+        "kwh": 7.2
+      },
+      {
+        "timestamp": "2024-01-01T14:30:00",
+        "kwh": 8.5
+      },
+      {
+        "timestamp": "2024-01-01T15:00:00",
+        "kwh": 9.8
+      },
+      {
+        "timestamp": "2024-01-01T15:30:00",
+        "kwh": 10.2
+      },
+      {
+        "timestamp": "2024-01-01T22:00:00",
+        "kwh": 3.5
+      },
+      {
+        "timestamp": "2024-01-01T23:30:00",
+        "kwh": 2.2
+      },
+      {
+        "timestamp": "2024-01-02T00:00:00",
+        "kwh": 2.4
+      },
+      {
+        "timestamp": "2024-01-02T00:30:00",
+        "kwh": 2.2
+      },
+      {
+        "timestamp": "2024-01-02T08:00:00",
+        "kwh": 5.0
+      },
+      {
+        "timestamp": "2024-01-02T14:30:00",
+        "kwh": 8.2
+      },
+      {
+        "timestamp": "2024-01-02T15:00:00",
+        "kwh": 9.5
+      }
+    ]
+  },
   "tariffs": {
     "tariff-001": {
       "id": "tariff-001",
@@ -237,6 +304,28 @@
         "service": 0.0058
       },
       "environmental_levy": 0.0254
+    },
+    "custom-tariff-1": {
+      "id": "custom-tariff-1",
+      "retailer": "Red Energy",
+      "plan_name": "Red Business TOU",
+      "type": "TOU",
+      "state": "VIC",
+      "supply_charge": 1.05,
+      "energy_rates": {
+        "peak": 0.41,
+        "shoulder": 0.28,
+        "offpeak": 0.18,
+        "flat": null
+      },
+      "demand_charge": null,
+      "network_charges": {
+        "distribution": 0.062,
+        "transmission": 0.019,
+        "metering": 0.016,
+        "service": 0.004
+      },
+      "environmental_levy": 0.021
     }
   },
   "client_tariffs": {
