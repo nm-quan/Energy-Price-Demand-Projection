@@ -107,11 +107,6 @@ export default function Dashboard() {
     : selectedMeters[0]
       ? selectedMeters[0].nickname
       : "Loading…";
-  const subtitle = isMulti
-    ? "Aggregated portfolio"
-    : selectedMeters[0]
-      ? `${selectedMeters[0].zone_name} · ${fmtNumber((selectedMeters[0].annual_kwh || 0) / 1000, 1)} MWh/yr`
-      : "";
 
   const dirty = APPLIANCE_IDS.some((id) => (scales[id] ?? 1.0) !== 1.0);
 
@@ -128,15 +123,9 @@ export default function Dashboard() {
         {/* Termina-style dark teal header */}
         <header className="flex items-center justify-between gap-4 bg-forest px-7 py-4 text-white">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.18em] font-semibold text-mint/80">
-              Load Shape Lab
-            </div>
             <div className="text-[20px] font-bold tracking-tightish leading-tight">
               {title}
             </div>
-            {subtitle && (
-              <div className="text-[12px] text-white/60">{subtitle}</div>
-            )}
           </div>
           <button
             data-testid="reset-all-btn"
@@ -208,8 +197,6 @@ export default function Dashboard() {
             )}
 
             <footer className="pt-2 pb-8 text-[11px] text-ink-mute leading-relaxed">
-              Total load = sum of all appliance meters across selected sites.
-              Adjust each appliance's load with − / + (0% = removed, 200% = double).
               Retailer plans modeled on the AER CDR public Energy Product Reference Data API.
             </footer>
           </div>
