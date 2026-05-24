@@ -1,44 +1,45 @@
 """
-Seed data for Load Shape Lab.
+Seed data for Load Shape Lab — cafe-chain portfolio.
 
-48 half-hourly buckets per day (0..47). Bucket i covers minutes [i*30, (i+1)*30).
-Bucket 0 = 00:00–00:30, bucket 18 = 09:00–09:30, etc.
+The meter-level load shape is composed as a SUM of appliance-level profiles.
+Each appliance has a 48-bucket (30-min) kW profile. Shiftable appliances also
+expose a `block` describing the user-facing moveable component:
+  { start: bucket, duration: buckets, power: kW }
 
-All TOU windows are expressed as half-hour bucket ranges (start_inclusive, end_exclusive).
+Moving the block from default_start to new_start:
+  shape[default_start : default_start+duration] -= power
+  shape[new_start : new_start+duration]         += power
+
+baseline_meter_shape = sum_over_appliances(scaled appliance.profile)
+where the scale factor matches the meter's target annual_kwh.
 """
 from __future__ import annotations
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # ─── Distribution-zone TOU windows (weekday) ─────────────────────────────────
-# Buckets are half-hour indices; end is exclusive.
-# Approximate published windows for residential / small business TOU tariffs.
 TOU_ZONES: Dict[str, Dict[str, Any]] = {
     "Citipower (VIC)": {
         "code": "citipower",
         "state": "VIC",
-        # Peak 15:00–21:00, Shoulder 07:00–15:00 & 21:00–22:00, Off-peak otherwise
         "peak": [(30, 42)],
         "shoulder": [(14, 30), (42, 44)],
     },
     "Ausgrid (NSW)": {
         "code": "ausgrid",
         "state": "NSW",
-        # Peak 14:00–20:00, Shoulder 07:00–14:00 & 20:00–22:00
         "peak": [(28, 40)],
         "shoulder": [(14, 28), (40, 44)],
     },
     "Energex (QLD)": {
         "code": "energex",
         "state": "QLD",
-        # Peak 16:00–20:00, Shoulder 07:00–16:00 & 20:00–22:00
         "peak": [(32, 40)],
         "shoulder": [(14, 32), (40, 44)],
     },
     "SA Power Networks (SA)": {
         "code": "sapn",
         "state": "SA",
-        # Peak 06:00–10:00 & 15:00–01:00, Shoulder 10:00–15:00
         "peak": [(12, 20), (30, 48), (0, 2)],
         "shoulder": [(20, 30)],
     },
@@ -58,367 +59,262 @@ def classify_bucket(zone_code: str, bucket: int) -> str:
     return "offpeak"
 
 
-# ─── Archetype load curves (kW per 30-min bucket, typical weekday) ───────────
-# Hand-built from public commercial load research (AusGrid, Sustainability Vic).
-# 48 entries each.
-def _smooth(base: List[float]) -> List[float]:
-    """Light triangular smoothing."""
-    out = []
-    for i in range(48):
-        a = base[(i - 1) % 48]
-        b = base[i]
-        c = base[(i + 1) % 48]
-        out.append(round((a + 2 * b + c) / 4, 2))
+# ─── Appliance-level profiles for the CAFE archetype ─────────────────────────
+# Designed so the sum approximates ~60 kWh/day = ~21,900 kWh/yr for a baseline cafe.
+# Each profile is 48 entries (kW per 30-min bucket).
+
+def _z(n: int) -> List[float]:
+    return [0.0] * n
+
+
+def _block(profile: List[float], start: int, duration: int, power: float) -> List[float]:
+    out = profile[:]
+    for i in range(start, min(start + duration, 48)):
+        out[i] += power
     return out
 
 
-ARCHETYPE_CURVES: Dict[str, List[float]] = {
-    # Cafe: opens 6am, breakfast & lunch peaks, closes 4pm
-    "cafe": _smooth([
-        1.2, 1.1, 1.0, 1.0, 1.0, 1.0, 1.1, 1.1,    # 00:00–04:00
-        1.2, 1.3, 1.5, 2.5, 5.5, 7.0, 8.2, 8.5,    # 04:00–08:00 (breakfast rush)
-        9.0, 8.5, 7.8, 7.2, 7.5, 8.0, 9.5, 11.0,   # 08:00–12:00 (lunch ramp)
-        12.5, 11.5, 9.8, 8.0, 6.5, 5.0, 4.2, 3.5,  # 12:00–16:00 (closing)
-        2.8, 2.2, 1.8, 1.6, 1.5, 1.4, 1.4, 1.3,    # 16:00–20:00
-        1.3, 1.3, 1.3, 1.2, 1.2, 1.2, 1.2, 1.2,    # 20:00–24:00
-    ]),
-    # Pub / bar: gentle daytime, big evening peak
-    "pub": _smooth([
-        3.5, 3.2, 2.8, 2.5, 2.3, 2.2, 2.2, 2.2,    # 00:00–04:00
-        2.3, 2.5, 3.0, 3.8, 5.0, 6.5, 7.5, 8.0,    # 04:00–08:00
-        8.5, 9.0, 9.5, 10.0, 11.5, 13.0, 14.5, 16.0,  # 08:00–12:00 (lunch)
-        17.0, 16.5, 15.5, 14.0, 13.5, 14.0, 15.5, 17.5,  # 12:00–16:00
-        20.0, 23.0, 26.0, 28.0, 29.0, 28.5, 27.0, 24.5,  # 16:00–20:00 (dinner)
-        21.0, 17.0, 12.0, 8.0, 6.0, 5.0, 4.5, 4.0,    # 20:00–24:00
-    ]),
-    # Retail store: 9–6 trading, HVAC dominant
-    "retail": _smooth([
-        2.0, 1.8, 1.6, 1.5, 1.4, 1.4, 1.4, 1.5,    # 00:00–04:00
-        1.6, 1.8, 2.5, 4.0, 6.5, 9.0, 11.0, 12.5,  # 04:00–08:00 (HVAC ramp)
-        14.0, 15.0, 15.5, 15.8, 16.0, 16.2, 16.5, 17.0,  # 08:00–12:00
-        17.8, 18.5, 18.8, 18.5, 18.0, 17.5, 16.8, 16.0,  # 12:00–16:00
-        15.2, 14.0, 11.0, 7.5, 5.0, 3.5, 2.8, 2.5,    # 16:00–20:00
-        2.3, 2.2, 2.1, 2.0, 2.0, 1.9, 1.9, 1.9,    # 20:00–24:00
-    ]),
-    # Small office: 8–6, weekday only
-    "office": _smooth([
-        1.5, 1.4, 1.3, 1.2, 1.2, 1.2, 1.3, 1.4,    # 00:00–04:00
-        1.5, 1.7, 2.5, 4.5, 7.0, 9.5, 11.0, 12.0,  # 04:00–08:00
-        12.5, 12.8, 13.0, 13.2, 13.5, 13.5, 13.2, 13.0,  # 08:00–12:00
-        13.5, 14.0, 14.2, 14.0, 13.5, 13.0, 12.5, 11.5,  # 12:00–16:00
-        10.0, 7.5, 5.0, 3.5, 2.8, 2.3, 2.0, 1.8,    # 16:00–20:00
-        1.7, 1.6, 1.6, 1.5, 1.5, 1.5, 1.5, 1.5,    # 20:00–24:00
-    ]),
-    # Warehouse / cold-store: 24/7 base + day shift
-    "warehouse": _smooth([
-        18.0, 17.5, 17.0, 16.8, 16.5, 16.5, 16.8, 17.0,  # 00:00–04:00
-        17.5, 18.0, 19.0, 20.5, 23.0, 26.0, 28.0, 29.0,  # 04:00–08:00
-        30.0, 30.5, 31.0, 31.2, 31.5, 31.8, 31.5, 31.0,  # 08:00–12:00
-        31.5, 32.0, 32.0, 31.5, 31.0, 30.5, 30.0, 29.5,  # 12:00–16:00
-        28.5, 26.5, 24.0, 22.0, 20.5, 19.5, 19.0, 18.5,  # 16:00–20:00
-        18.3, 18.2, 18.0, 18.0, 17.8, 17.8, 17.8, 18.0,  # 20:00–24:00
-    ]),
-}
+# Fridges — 0.7 kW continuous baseline + small defrost spike at 03:00
+_FRIDGES = [0.7] * 48
+_FRIDGES = _block(_FRIDGES, 6, 1, 0.3)  # 03:00 defrost +0.3 kW
+
+# Espresso machine — idle ~0, spikes during open hours 07:00–15:30
+_ESPRESSO = (
+    _z(14)
+    + [0.6, 1.2, 2.1, 1.8, 1.9, 1.5, 1.0, 1.6, 1.9, 2.0, 1.4, 1.0, 0.8, 1.0, 1.2, 1.4, 0.6, 0.4]
+    + _z(16)
+)
+
+# Ovens — food prep 07:30–14:00
+_OVENS = (
+    _z(15)
+    + [1.2, 2.6, 2.9, 2.2, 1.4, 1.8, 1.0, 0.7, 0.4, 0.3, 0.2, 0.2, 0.1]
+    + _z(20)
+)
+
+# HVAC — cooling tracks midday peak 09:00–17:00 (defined as a baseline curve,
+# the pre-cool shift block is described separately on the appliance entry)
+_HVAC = (
+    _z(16)
+    + [0.4, 0.8, 1.2, 1.6, 2.0, 2.3, 2.4, 2.5, 2.4, 2.2, 2.0, 1.7, 1.3, 0.9, 0.5, 0.3, 0.1]
+    + _z(15)
+)
+
+# Lighting — open hours 06:00–18:00 at 0.6 kW
+_LIGHTING = _z(12) + [0.6] * 24 + _z(12)
+
+# Dishwasher — single cycle 16:30–17:30 (buckets 33–34) at 3.0 kW
+_DISHWASHER = _z(48)
+_DISHWASHER = _block(_DISHWASHER, 33, 2, 3.0)
+
+# Hot water — overnight reheat 23:30–04:00 at 2.4 kW
+_HOT_WATER = _z(48)
+_HOT_WATER = _block(_HOT_WATER, 47, 1, 2.4)
+_HOT_WATER = _block(_HOT_WATER, 0, 8, 2.4)
+
+# Misc (POS, fans, AV) — 0.2 kW during open hours
+_MISC = _z(13) + [0.2] * 22 + _z(13)
 
 
-# ─── Pre-loaded sample meters ────────────────────────────────────────────────
-SAMPLE_METERS: List[Dict[str, Any]] = [
+CAFE_APPLIANCES: List[Dict[str, Any]] = [
     {
-        "id": "MTR-001",
-        "nmi": "6102345678",
-        "nickname": "Brunswick East Cafe",
-        "archetype": "cafe",
-        "zone_code": "citipower",
-        "zone_name": "Citipower (VIC)",
-        "state": "VIC",
-        "annual_kwh": 32850,
-        "current_plan_id": "plan-agl-residential-vic",
-        "current_plan_label": "AGL Standing Offer · VIC",
-        "monthly_spend": [820, 780, 760, 740, 760, 880, 920, 940, 880, 820, 800, 850],
+        "id": "fridges",
+        "name": "Fridges (3 units)",
+        "shiftable": False,
+        "profile": _FRIDGES,
+        "note": "Continuous baseline 24/7 · cannot be shifted",
     },
     {
-        "id": "MTR-002",
-        "nmi": "4304567890",
-        "nickname": "Newtown Public House",
-        "archetype": "pub",
-        "zone_code": "ausgrid",
-        "zone_name": "Ausgrid (NSW)",
-        "state": "NSW",
-        "annual_kwh": 91250,
-        "current_plan_id": "plan-origin-business-saver",
-        "current_plan_label": "Origin Business Saver · NSW",
-        "monthly_spend": [2150, 2050, 1980, 1920, 1980, 2280, 2400, 2450, 2280, 2150, 2080, 2200],
+        "id": "espresso",
+        "name": "Espresso machine",
+        "shiftable": False,
+        "profile": _ESPRESSO,
+        "note": "Idle then spikes during service",
     },
     {
-        "id": "MTR-003",
-        "nmi": "3008765432",
-        "nickname": "Fortitude Valley Boutique",
-        "archetype": "retail",
-        "zone_code": "energex",
-        "zone_name": "Energex (QLD)",
-        "state": "QLD",
-        "annual_kwh": 54750,
-        "current_plan_id": "plan-energy-australia-flexi",
-        "current_plan_label": "EnergyAustralia Flexi · QLD",
-        "monthly_spend": [1320, 1280, 1200, 1140, 1180, 1380, 1480, 1520, 1420, 1300, 1240, 1340],
+        "id": "ovens",
+        "name": "Ovens",
+        "shiftable": False,
+        "profile": _OVENS,
+        "note": "On during food prep 7:30–14:00",
     },
     {
-        "id": "MTR-004",
-        "nmi": "6203334445",
-        "nickname": "Collins St Architects",
-        "archetype": "office",
-        "zone_code": "citipower",
-        "zone_name": "Citipower (VIC)",
-        "state": "VIC",
-        "annual_kwh": 41500,
-        "current_plan_id": "plan-red-energy-living",
-        "current_plan_label": "Red Energy Living Energy Saver",
-        "monthly_spend": [980, 940, 910, 880, 910, 1040, 1100, 1120, 1050, 980, 950, 990],
+        "id": "hvac",
+        "name": "HVAC",
+        "shiftable": True,
+        "profile": _HVAC,
+        "feasibility": "medium",
+        "hardware_cost": 350,
+        "note": "Pre-cool before peak window with a smart thermostat",
+        # The shift block represents the slice of HVAC load the user is choosing
+        # to pre-cool — defaults to sit on top of the midday peak (12:00–14:00)
+        # so dragging earlier visibly relieves the peak.
+        "block": {"start": 24, "duration": 4, "power": 2.0},
     },
     {
-        "id": "MTR-005",
-        "nmi": "2008889990",
-        "nickname": "Adelaide Cold Storage",
-        "archetype": "warehouse",
-        "zone_code": "sapn",
-        "zone_name": "SA Power Networks (SA)",
-        "state": "SA",
-        "annual_kwh": 222650,
-        "current_plan_id": "plan-alinta-business-flex",
-        "current_plan_label": "Alinta Business Flex · SA",
-        "monthly_spend": [5400, 5180, 5020, 4860, 5020, 5680, 6020, 6180, 5780, 5400, 5180, 5500],
+        "id": "lighting",
+        "name": "Lighting",
+        "shiftable": False,
+        "profile": _LIGHTING,
+        "note": "Tied to trading hours",
+    },
+    {
+        "id": "dishwasher",
+        "name": "Dishwasher cycle",
+        "shiftable": True,
+        "profile": _DISHWASHER,
+        "feasibility": "easy",
+        "hardware_cost": 50,
+        "note": "Timer-controlled commercial dishwasher — end of service",
+        "block": {"start": 33, "duration": 2, "power": 3.0},
+    },
+    {
+        "id": "hot-water",
+        "name": "Hot water tank",
+        "shiftable": True,
+        "profile": _HOT_WATER,
+        "feasibility": "easy",
+        "hardware_cost": 80,
+        "note": "Tank reheat — must finish by 06:00 for breakfast",
+        "block": {"start": 0, "duration": 8, "power": 2.4},
+    },
+    {
+        "id": "misc",
+        "name": "Misc (POS, fans)",
+        "shiftable": False,
+        "profile": _MISC,
+        "note": "Always on while trading",
     },
 ]
 
 
-# ─── Shift library — assets the user can drag onto the canvas ────────────────
-# duration is the number of half-hour buckets (1 = 30 min). power is kW draw.
-SHIFT_ASSETS: Dict[str, List[Dict[str, Any]]] = {
-    "cafe": [
-        {"id": "dishwasher", "label": "Dishwasher cycles", "power": 2.5, "duration": 2, "default_start": 36, "feasibility": "easy", "hardware_cost": 50, "note": "Timer-controlled commercial dishwasher"},
-        {"id": "hot-water", "label": "Hot water heating", "power": 6.0, "duration": 4, "default_start": 12, "feasibility": "easy", "hardware_cost": 80, "note": "Tank reheat — must finish by 06:00"},
-        {"id": "hvac-precool", "label": "HVAC pre-cool", "power": 4.0, "duration": 4, "default_start": 16, "feasibility": "medium", "hardware_cost": 350, "note": "Smart thermostat schedule"},
-        {"id": "fridge-defrost", "label": "Display fridge defrost", "power": 1.5, "duration": 1, "default_start": 6, "feasibility": "easy", "hardware_cost": 0, "note": "Programmable defrost cycle"},
-        {"id": "oven-prep", "label": "Oven pre-heat", "power": 5.5, "duration": 1, "default_start": 11, "feasibility": "hard", "hardware_cost": 200, "note": "Requires staff rota change"},
-    ],
-    "pub": [
-        {"id": "glasswasher", "label": "Glasswasher batch", "power": 3.0, "duration": 2, "default_start": 44, "feasibility": "easy", "hardware_cost": 50, "note": "Run after close"},
-        {"id": "cellar-cooling", "label": "Cellar cooling", "power": 4.5, "duration": 4, "default_start": 32, "feasibility": "medium", "hardware_cost": 400, "note": "Pre-cool before peak"},
-        {"id": "ice-machine", "label": "Ice machine", "power": 2.0, "duration": 6, "default_start": 0, "feasibility": "easy", "hardware_cost": 60, "note": "Make ice overnight"},
-        {"id": "kitchen-prep", "label": "Kitchen pre-heat", "power": 7.0, "duration": 1, "default_start": 36, "feasibility": "hard", "hardware_cost": 0, "note": "Staff schedule change"},
-        {"id": "hvac-precool-pub", "label": "HVAC pre-cool", "power": 6.0, "duration": 4, "default_start": 24, "feasibility": "medium", "hardware_cost": 400, "note": "Pre-cool before evening rush"},
-    ],
-    "retail": [
-        {"id": "hvac-precool-retail", "label": "HVAC pre-cool", "power": 8.0, "duration": 4, "default_start": 16, "feasibility": "medium", "hardware_cost": 500, "note": "Cool before shoulder peak"},
-        {"id": "lighting-warmup", "label": "Lighting warmup", "power": 2.5, "duration": 1, "default_start": 16, "feasibility": "easy", "hardware_cost": 80, "note": "Timer relay"},
-        {"id": "stockroom-fans", "label": "Stockroom ventilation", "power": 1.8, "duration": 4, "default_start": 0, "feasibility": "easy", "hardware_cost": 50, "note": "Overnight ventilation"},
-        {"id": "delivery-charge", "label": "Delivery van charge", "power": 7.0, "duration": 6, "default_start": 0, "feasibility": "medium", "hardware_cost": 0, "note": "EV charger scheduling"},
-    ],
-    "office": [
-        {"id": "hvac-precool-office", "label": "HVAC pre-cool", "power": 6.5, "duration": 4, "default_start": 14, "feasibility": "medium", "hardware_cost": 450, "note": "BMS scheduling"},
-        {"id": "server-batch", "label": "Server batch jobs", "power": 3.0, "duration": 6, "default_start": 2, "feasibility": "easy", "hardware_cost": 0, "note": "Move backups to overnight"},
-        {"id": "ev-charge-fleet", "label": "Fleet EV charging", "power": 11.0, "duration": 10, "default_start": 38, "feasibility": "medium", "hardware_cost": 800, "note": "OCPP smart charge schedule"},
-        {"id": "hot-water-office", "label": "Hot water tank", "power": 3.5, "duration": 2, "default_start": 8, "feasibility": "easy", "hardware_cost": 60, "note": "Timer relay"},
-    ],
-    "warehouse": [
-        {"id": "coolroom-precool", "label": "Coolroom pre-cool", "power": 15.0, "duration": 6, "default_start": 4, "feasibility": "medium", "hardware_cost": 1200, "note": "Drop setpoint overnight"},
-        {"id": "compressor-stagger", "label": "Compressor stagger", "power": 8.0, "duration": 4, "default_start": 0, "feasibility": "medium", "hardware_cost": 900, "note": "Stagger start to flatten peak"},
-        {"id": "forklift-charge", "label": "Forklift charging", "power": 10.0, "duration": 8, "default_start": 36, "feasibility": "easy", "hardware_cost": 200, "note": "Charge end of shift"},
-        {"id": "loading-lights", "label": "Loading-bay lights", "power": 4.0, "duration": 4, "default_start": 12, "feasibility": "easy", "hardware_cost": 100, "note": "Daylight harvesting"},
-    ],
+# Baseline cafe daily kWh (un-scaled) — used to derive a per-meter scale factor
+def _appliance_daily_kwh(profile: List[float]) -> float:
+    return sum(max(v, 0.0) for v in profile) * 0.5
+
+
+_CAFE_BASE_DAILY_KWH = sum(_appliance_daily_kwh(a["profile"]) for a in CAFE_APPLIANCES)
+
+
+ARCHETYPE_APPLIANCES: Dict[str, List[Dict[str, Any]]] = {
+    "cafe": CAFE_APPLIANCES,
 }
 
 
+def appliance_scale(archetype: str, target_annual_kwh: float) -> float:
+    """Return the multiplicative scale factor so the sum of appliance profiles
+    matches a meter's target annual kWh."""
+    base_daily = {"cafe": _CAFE_BASE_DAILY_KWH}.get(archetype, _CAFE_BASE_DAILY_KWH)
+    target_daily = target_annual_kwh / 365.0
+    if base_daily <= 0:
+        return 1.0
+    return target_daily / base_daily
+
+
+# ─── Pre-loaded portfolio — a 10-site cafe chain ─────────────────────────────
+# Same brand, mixed states, varying turnover.
+SAMPLE_METERS: List[Dict[str, Any]] = [
+    {
+        "id": "MTR-001", "nmi": "6102345671", "nickname": "Brunswick East",
+        "archetype": "cafe", "zone_code": "citipower", "zone_name": "Citipower (VIC)",
+        "state": "VIC", "annual_kwh": 24800,
+        "current_plan_id": "plan-agl-residential-vic",
+        "current_plan_label": "AGL Standing Offer · Small Business",
+        "monthly_spend": [620, 590, 575, 560, 575, 670, 700, 715, 670, 620, 605, 645],
+    },
+    {
+        "id": "MTR-002", "nmi": "6102345672", "nickname": "Fitzroy North",
+        "archetype": "cafe", "zone_code": "citipower", "zone_name": "Citipower (VIC)",
+        "state": "VIC", "annual_kwh": 22650,
+        "current_plan_id": "plan-agl-residential-vic",
+        "current_plan_label": "AGL Standing Offer · Small Business",
+        "monthly_spend": [565, 545, 530, 515, 530, 615, 645, 660, 615, 570, 555, 590],
+    },
+    {
+        "id": "MTR-003", "nmi": "6102345673", "nickname": "Carlton",
+        "archetype": "cafe", "zone_code": "citipower", "zone_name": "Citipower (VIC)",
+        "state": "VIC", "annual_kwh": 26900,
+        "current_plan_id": "plan-momentum-smile",
+        "current_plan_label": "Momentum Smile Business",
+        "monthly_spend": [675, 645, 625, 610, 625, 730, 765, 780, 730, 680, 660, 700],
+    },
+    {
+        "id": "MTR-004", "nmi": "4304567674", "nickname": "Newtown",
+        "archetype": "cafe", "zone_code": "ausgrid", "zone_name": "Ausgrid (NSW)",
+        "state": "NSW", "annual_kwh": 28200,
+        "current_plan_id": "plan-origin-business-saver",
+        "current_plan_label": "Origin Business Saver · NSW",
+        "monthly_spend": [715, 685, 665, 650, 665, 770, 805, 820, 770, 720, 700, 735],
+    },
+    {
+        "id": "MTR-005", "nmi": "4304567675", "nickname": "Surry Hills",
+        "archetype": "cafe", "zone_code": "ausgrid", "zone_name": "Ausgrid (NSW)",
+        "state": "NSW", "annual_kwh": 31400,
+        "current_plan_id": "plan-origin-business-saver",
+        "current_plan_label": "Origin Business Saver · NSW",
+        "monthly_spend": [790, 755, 735, 720, 735, 855, 895, 910, 855, 800, 775, 825],
+    },
+    {
+        "id": "MTR-006", "nmi": "4304567676", "nickname": "Bondi Junction",
+        "archetype": "cafe", "zone_code": "ausgrid", "zone_name": "Ausgrid (NSW)",
+        "state": "NSW", "annual_kwh": 19850,
+        "current_plan_id": "plan-energy-australia-flexi",
+        "current_plan_label": "EnergyAustralia Flexi · NSW",
+        "monthly_spend": [500, 475, 460, 450, 460, 535, 560, 570, 535, 500, 485, 515],
+    },
+    {
+        "id": "MTR-007", "nmi": "3008765677", "nickname": "Fortitude Valley",
+        "archetype": "cafe", "zone_code": "energex", "zone_name": "Energex (QLD)",
+        "state": "QLD", "annual_kwh": 23500,
+        "current_plan_id": "plan-energy-australia-flexi",
+        "current_plan_label": "EnergyAustralia Flexi · QLD",
+        "monthly_spend": [590, 565, 550, 535, 550, 635, 665, 680, 635, 595, 575, 615],
+    },
+    {
+        "id": "MTR-008", "nmi": "3008765678", "nickname": "South Bank",
+        "archetype": "cafe", "zone_code": "energex", "zone_name": "Energex (QLD)",
+        "state": "QLD", "annual_kwh": 21100,
+        "current_plan_id": "plan-energy-australia-flexi",
+        "current_plan_label": "EnergyAustralia Flexi · QLD",
+        "monthly_spend": [530, 510, 495, 480, 495, 570, 600, 610, 570, 535, 520, 555],
+    },
+    {
+        "id": "MTR-009", "nmi": "2008889679", "nickname": "North Adelaide",
+        "archetype": "cafe", "zone_code": "sapn", "zone_name": "SA Power Networks (SA)",
+        "state": "SA", "annual_kwh": 18750,
+        "current_plan_id": "plan-alinta-business-flex",
+        "current_plan_label": "Alinta Business Flex · SA",
+        "monthly_spend": [475, 455, 440, 430, 440, 510, 535, 545, 510, 480, 465, 495],
+    },
+    {
+        "id": "MTR-010", "nmi": "2008889680", "nickname": "Glenelg",
+        "archetype": "cafe", "zone_code": "sapn", "zone_name": "SA Power Networks (SA)",
+        "state": "SA", "annual_kwh": 16400,
+        "current_plan_id": "plan-alinta-business-flex",
+        "current_plan_label": "Alinta Business Flex · SA",
+        "monthly_spend": [415, 395, 385, 375, 385, 445, 470, 475, 445, 420, 405, 430],
+    },
+]
+
+
 # ─── Retailer plans (modeled on AER CDR public dataset) ─────────────────────
-# Rates are c/kWh stored as $/kWh. Realistic 2025 figures for AU small-business.
 SAMPLE_PLANS: List[Dict[str, Any]] = [
-    {
-        "id": "plan-agl-residential-vic",
-        "retailer": "AGL",
-        "name": "Standing Offer · Small Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.0945,
-        "peak_rate": 0.4287,
-        "shoulder_rate": 0.2854,
-        "offpeak_rate": 0.1925,
-        "flat_rate": None,
-        "tags": ["standing-offer"],
-        "fragility": "No conditional discount",
-        "source": "AER CDR public dataset (AGL)",
-    },
-    {
-        "id": "plan-agl-solar-savers-vic",
-        "retailer": "AGL",
-        "name": "Solar Savers Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.1825,
-        "peak_rate": 0.3895,
-        "shoulder_rate": 0.2410,
-        "offpeak_rate": 0.1685,
-        "flat_rate": None,
-        "tags": ["solar-friendly"],
-        "fragility": "Better feed-in but higher supply",
-        "source": "AER CDR public dataset (AGL)",
-    },
-    {
-        "id": "plan-origin-business-saver",
-        "retailer": "Origin",
-        "name": "Business Saver",
-        "plan_type": "TOU",
-        "state": "NSW",
-        "supply_charge": 1.2230,
-        "peak_rate": 0.4520,
-        "shoulder_rate": 0.2740,
-        "offpeak_rate": 0.1810,
-        "flat_rate": None,
-        "tags": ["conditional-discount"],
-        "fragility": "5% pay-on-time discount",
-        "source": "AER CDR public dataset (Origin)",
-    },
-    {
-        "id": "plan-origin-go-flat",
-        "retailer": "Origin",
-        "name": "Go Flat Business",
-        "plan_type": "Flat",
-        "state": "NSW",
-        "supply_charge": 1.1450,
-        "peak_rate": None,
-        "shoulder_rate": None,
-        "offpeak_rate": None,
-        "flat_rate": 0.3245,
-        "tags": ["simple"],
-        "fragility": "No exit fee",
-        "source": "AER CDR public dataset (Origin)",
-    },
-    {
-        "id": "plan-energy-australia-flexi",
-        "retailer": "EnergyAustralia",
-        "name": "Flexi Business",
-        "plan_type": "TOU",
-        "state": "QLD",
-        "supply_charge": 1.0820,
-        "peak_rate": 0.4118,
-        "shoulder_rate": 0.2615,
-        "offpeak_rate": 0.1745,
-        "flat_rate": None,
-        "tags": ["smart-meter-required"],
-        "fragility": "Requires Type-4 meter",
-        "source": "AER CDR public dataset (EnergyAustralia)",
-    },
-    {
-        "id": "plan-energy-australia-total",
-        "retailer": "EnergyAustralia",
-        "name": "Total Business",
-        "plan_type": "Flat",
-        "state": "QLD",
-        "supply_charge": 1.0240,
-        "peak_rate": None,
-        "shoulder_rate": None,
-        "offpeak_rate": None,
-        "flat_rate": 0.3380,
-        "tags": ["simple"],
-        "fragility": "12-month benefit period",
-        "source": "AER CDR public dataset (EnergyAustralia)",
-    },
-    {
-        "id": "plan-red-energy-living",
-        "retailer": "Red Energy",
-        "name": "Living Energy Saver Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.0510,
-        "peak_rate": 0.4012,
-        "shoulder_rate": 0.2520,
-        "offpeak_rate": 0.1820,
-        "flat_rate": None,
-        "tags": ["qantas-points"],
-        "fragility": "Bonus Qantas points",
-        "source": "AER CDR public dataset (Red Energy)",
-    },
-    {
-        "id": "plan-alinta-business-flex",
-        "retailer": "Alinta Energy",
-        "name": "Business Flex",
-        "plan_type": "TOU",
-        "state": "SA",
-        "supply_charge": 1.3450,
-        "peak_rate": 0.4895,
-        "shoulder_rate": 0.3120,
-        "offpeak_rate": 0.2010,
-        "flat_rate": None,
-        "tags": ["no-exit-fee"],
-        "fragility": "Standing-offer fallback rate is steep",
-        "source": "AER CDR public dataset (Alinta)",
-    },
-    {
-        "id": "plan-momentum-smile",
-        "retailer": "Momentum Energy",
-        "name": "Smile Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.0985,
-        "peak_rate": 0.3978,
-        "shoulder_rate": 0.2440,
-        "offpeak_rate": 0.1695,
-        "flat_rate": None,
-        "tags": ["hydro-tas-backed"],
-        "fragility": "100% Australian-owned",
-        "source": "AER CDR public dataset (Momentum)",
-    },
-    {
-        "id": "plan-powershop-business",
-        "retailer": "Powershop",
-        "name": "Powershop Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.0720,
-        "peak_rate": 0.3850,
-        "shoulder_rate": 0.2380,
-        "offpeak_rate": 0.1610,
-        "flat_rate": None,
-        "tags": ["100-renewable"],
-        "fragility": "Pack-based prepay model",
-        "source": "AER CDR public dataset (Powershop)",
-    },
-    {
-        "id": "plan-ovo-business",
-        "retailer": "OVO Energy",
-        "name": "OVO Business",
-        "plan_type": "TOU",
-        "state": "VIC",
-        "supply_charge": 1.0290,
-        "peak_rate": 0.3680,
-        "shoulder_rate": 0.2280,
-        "offpeak_rate": 0.1520,
-        "flat_rate": None,
-        "tags": ["carbon-neutral"],
-        "fragility": "Smaller retailer, less brand presence",
-        "source": "AER CDR public dataset (OVO)",
-    },
-    {
-        "id": "plan-simply-energy-business",
-        "retailer": "Simply Energy",
-        "name": "Business Plus",
-        "plan_type": "Demand",
-        "state": "VIC",
-        "supply_charge": 0.8950,
-        "peak_rate": 0.3120,
-        "shoulder_rate": 0.2240,
-        "offpeak_rate": 0.1450,
-        "flat_rate": None,
-        "demand_charge_per_kw_month": 18.50,
-        "tags": ["demand-tariff"],
-        "fragility": "Penalises peak kW — flatten your curve",
-        "source": "AER CDR public dataset (Simply Energy)",
-    },
+    {"id": "plan-agl-residential-vic", "retailer": "AGL", "name": "Standing Offer · Small Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.0945, "peak_rate": 0.4287, "shoulder_rate": 0.2854, "offpeak_rate": 0.1925, "flat_rate": None, "tags": ["standing-offer"], "fragility": "No conditional discount", "source": "AER CDR public dataset (AGL)"},
+    {"id": "plan-agl-solar-savers-vic", "retailer": "AGL", "name": "Solar Savers Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.1825, "peak_rate": 0.3895, "shoulder_rate": 0.2410, "offpeak_rate": 0.1685, "flat_rate": None, "tags": ["solar-friendly"], "fragility": "Better feed-in but higher supply", "source": "AER CDR public dataset (AGL)"},
+    {"id": "plan-origin-business-saver", "retailer": "Origin", "name": "Business Saver", "plan_type": "TOU", "state": "NSW", "supply_charge": 1.2230, "peak_rate": 0.4520, "shoulder_rate": 0.2740, "offpeak_rate": 0.1810, "flat_rate": None, "tags": ["conditional-discount"], "fragility": "5% pay-on-time discount", "source": "AER CDR public dataset (Origin)"},
+    {"id": "plan-origin-go-flat", "retailer": "Origin", "name": "Go Flat Business", "plan_type": "Flat", "state": "NSW", "supply_charge": 1.1450, "peak_rate": None, "shoulder_rate": None, "offpeak_rate": None, "flat_rate": 0.3245, "tags": ["simple"], "fragility": "No exit fee", "source": "AER CDR public dataset (Origin)"},
+    {"id": "plan-energy-australia-flexi", "retailer": "EnergyAustralia", "name": "Flexi Business", "plan_type": "TOU", "state": "QLD", "supply_charge": 1.0820, "peak_rate": 0.4118, "shoulder_rate": 0.2615, "offpeak_rate": 0.1745, "flat_rate": None, "tags": ["smart-meter-required"], "fragility": "Requires Type-4 meter", "source": "AER CDR public dataset (EnergyAustralia)"},
+    {"id": "plan-energy-australia-total", "retailer": "EnergyAustralia", "name": "Total Business", "plan_type": "Flat", "state": "QLD", "supply_charge": 1.0240, "peak_rate": None, "shoulder_rate": None, "offpeak_rate": None, "flat_rate": 0.3380, "tags": ["simple"], "fragility": "12-month benefit period", "source": "AER CDR public dataset (EnergyAustralia)"},
+    {"id": "plan-red-energy-living", "retailer": "Red Energy", "name": "Living Energy Saver Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.0510, "peak_rate": 0.4012, "shoulder_rate": 0.2520, "offpeak_rate": 0.1820, "flat_rate": None, "tags": ["qantas-points"], "fragility": "Bonus Qantas points", "source": "AER CDR public dataset (Red Energy)"},
+    {"id": "plan-alinta-business-flex", "retailer": "Alinta Energy", "name": "Business Flex", "plan_type": "TOU", "state": "SA", "supply_charge": 1.3450, "peak_rate": 0.4895, "shoulder_rate": 0.3120, "offpeak_rate": 0.2010, "flat_rate": None, "tags": ["no-exit-fee"], "fragility": "Standing-offer fallback rate is steep", "source": "AER CDR public dataset (Alinta)"},
+    {"id": "plan-momentum-smile", "retailer": "Momentum Energy", "name": "Smile Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.0985, "peak_rate": 0.3978, "shoulder_rate": 0.2440, "offpeak_rate": 0.1695, "flat_rate": None, "tags": ["hydro-tas-backed"], "fragility": "100% Australian-owned", "source": "AER CDR public dataset (Momentum)"},
+    {"id": "plan-powershop-business", "retailer": "Powershop", "name": "Powershop Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.0720, "peak_rate": 0.3850, "shoulder_rate": 0.2380, "offpeak_rate": 0.1610, "flat_rate": None, "tags": ["100-renewable"], "fragility": "Pack-based prepay model", "source": "AER CDR public dataset (Powershop)"},
+    {"id": "plan-ovo-business", "retailer": "OVO Energy", "name": "OVO Business", "plan_type": "TOU", "state": "VIC", "supply_charge": 1.0290, "peak_rate": 0.3680, "shoulder_rate": 0.2280, "offpeak_rate": 0.1520, "flat_rate": None, "tags": ["carbon-neutral"], "fragility": "Smaller retailer, less brand presence", "source": "AER CDR public dataset (OVO)"},
+    {"id": "plan-simply-energy-business", "retailer": "Simply Energy", "name": "Business Plus", "plan_type": "Demand", "state": "VIC", "supply_charge": 0.8950, "peak_rate": 0.3120, "shoulder_rate": 0.2240, "offpeak_rate": 0.1450, "flat_rate": None, "demand_charge_per_kw_month": 18.50, "tags": ["demand-tariff"], "fragility": "Penalises peak kW — flatten your curve", "source": "AER CDR public dataset (Simply Energy)"},
 ]
 
 
 # ─── Real NEM spot price overlay (averaged) ──────────────────────────────────
-# Approximate VIC1 RRP half-hourly average from the existing repo's processed data,
-# downsampled to 48 buckets. $/MWh.
 NEM_SPOT_AVG_VIC: List[float] = [
     72, 71, 68, 65, 62, 60, 58, 56, 55, 54, 56, 62,
     74, 86, 94, 102, 108, 110, 112, 110, 105, 98, 92, 88,
@@ -426,3 +322,72 @@ NEM_SPOT_AVG_VIC: List[float] = [
     218, 238, 246, 232, 198, 162, 132, 108,
     94, 84, 78, 74, 72, 70, 68, 66,
 ]
+
+
+# ─── Helpers exported for cost engine ────────────────────────────────────────
+
+def meter_appliances(meter: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return appliances scaled to this meter's annual kWh."""
+    apps = ARCHETYPE_APPLIANCES.get(meter["archetype"], [])
+    k = appliance_scale(meter["archetype"], meter["annual_kwh"])
+    out = []
+    for a in apps:
+        scaled_profile = [round(v * k, 4) for v in a["profile"]]
+        scaled_block: Optional[Dict[str, Any]] = None
+        if a.get("block"):
+            b = a["block"]
+            scaled_block = {**b, "power": round(b["power"] * k, 4)}
+        out.append({**a, "profile": scaled_profile, "block": scaled_block})
+    return out
+
+
+def meter_baseline_shape(meter: Dict[str, Any]) -> List[float]:
+    apps = meter_appliances(meter)
+    out = [0.0] * 48
+    for a in apps:
+        for i, v in enumerate(a["profile"]):
+            out[i] += v
+    return [round(v, 4) for v in out]
+
+
+def shifted_shape(meter: Dict[str, Any], asset_positions: Dict[str, int],
+                  active_assets: List[str]) -> List[float]:
+    """Compute the shape after applying user shifts (signed; may go negative)."""
+    apps = meter_appliances(meter)
+    shape = meter_baseline_shape(meter)
+    for a in apps:
+        if not a.get("shiftable") or not a.get("block"):
+            continue
+        if a["id"] not in active_assets:
+            continue
+        new_start = asset_positions.get(a["id"], a["block"]["start"])
+        if new_start == a["block"]["start"]:
+            continue
+        power = a["block"]["power"]
+        duration = a["block"]["duration"]
+        for i in range(a["block"]["start"], a["block"]["start"] + duration):
+            if 0 <= i < 48:
+                shape[i] -= power
+        for i in range(new_start, new_start + duration):
+            if 0 <= i < 48:
+                shape[i] += power
+    return [round(v, 4) for v in shape]
+
+
+def meter_shift_assets(meter: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return UI-shaped shift_assets for a meter — derived from shiftable appliances."""
+    out = []
+    for a in meter_appliances(meter):
+        if not a.get("shiftable") or not a.get("block"):
+            continue
+        out.append({
+            "id": a["id"],
+            "label": a["name"],
+            "power": a["block"]["power"],
+            "duration": a["block"]["duration"],
+            "default_start": a["block"]["start"],
+            "feasibility": a.get("feasibility", "medium"),
+            "hardware_cost": a.get("hardware_cost", 0),
+            "note": a.get("note", ""),
+        })
+    return out

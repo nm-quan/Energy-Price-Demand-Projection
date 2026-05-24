@@ -79,7 +79,7 @@ function AssetRow({ asset, active, onToggle, onReset }) {
   );
 }
 
-export default function ShiftLibrary({ assets, activeIds, onToggle, onReset }) {
+export default function ShiftLibrary({ assets, activeIds, onToggle, onReset, multiSiteCount = 0 }) {
   if (!assets || !assets.length) return null;
   return (
     <aside
@@ -89,10 +89,12 @@ export default function ShiftLibrary({ assets, activeIds, onToggle, onReset }) {
       <div className="px-4 pt-4 pb-2">
         <div className="eyebrow">Shift library</div>
         <h3 className="mt-0.5 text-[15px] font-semibold tracking-tightish text-ink">
-          Shiftable assets
+          Shiftable appliances
         </h3>
         <p className="mt-1 text-[11.5px] text-ink-mute">
-          Toggle on, drag the block on the canvas to a cheaper window.
+          {multiSiteCount > 1
+            ? `Shifts apply chain-wide across ${multiSiteCount} sites.`
+            : "Toggle on, drag the block on the canvas to a cheaper window."}
         </p>
       </div>
       <div className="space-y-2 px-3 pb-3">

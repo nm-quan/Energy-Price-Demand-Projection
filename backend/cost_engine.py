@@ -62,7 +62,7 @@ def annual_cost(shape: List[float], plan: Dict, zone_code: str) -> Dict:
         peak_kw = 0.0
         for i, kw in enumerate(shape):
             if classify_bucket(zone_code, i) == "peak":
-                peak_kw = max(peak_kw, kw)
+                peak_kw = max(peak_kw, max(kw, 0.0))
         annual_demand = float(plan.get("demand_charge_per_kw_month") or 0.0) * peak_kw * 12.0
 
     annual_total = annual_usage + annual_supply + annual_demand

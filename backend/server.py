@@ -4,19 +4,20 @@ Load Shape Lab — FastAPI backend.
 Endpoints:
   GET  /api/                       — health
   GET  /api/meters                 — list pre-loaded sample meters
-  GET  /api/meters/{id}            — meter detail + baseline 48-bucket curve
+  GET  /api/meters/{id}            — meter detail (baseline shape, appliances, shift_assets)
   GET  /api/plans                  — list retailer plans
   GET  /api/zones                  — TOU zone metadata
   GET  /api/spot                   — NEM spot price overlay (48 buckets, $/MWh)
-  POST /api/rank                   — given a shape + meter, rank plans by annual cost
-  POST /api/refresh-cdr            — best-effort merge of AER CDR public dataset
+  POST /api/rank                   — given meter_ids + asset_positions + active_assets,
+                                     return aggregated curves, per-meter shapes, and ranked plans.
+  POST /api/refresh-cdr            — best-effort fetch from AER CDR
 """
 from __future__ import annotations
 
 import os
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -26,12 +27,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 from seed_data import (
-    ARCHETYPE_CURVES,
+    ARCHETYPE_APPLIANCES,
     NEM_SPOT_AVG_VIC,
     SAMPLE_METERS,
     SAMPLE_PLANS,
-    SHIFT_ASSETS,
     TOU_ZONES,
+    meter_appliances,
+    meter_baseline_shape,
+    meter_shift_assets,
+    shifted_shape,
 )
 from cost_engine import annual_cost, shape_stats
 
@@ -47,7 +51,7 @@ DB_NAME = os.environ["DB_NAME"]
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title="Load Shape Lab API", version="0.1.0")
+app = FastAPI(title="Load Shape Lab API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,29 +64,9 @@ app.add_middleware(
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 class RankRequest(BaseModel):
-    meter_id: str = Field(..., description="Sample meter id (e.g. MTR-001)")
-    shape: List[float] = Field(..., min_length=48, max_length=48)
-
-
-class RankedPlan(BaseModel):
-    plan: dict
-    baseline_cost: float
-    shifted_cost: float
-    annual_delta: float
-    pct_delta: float
-
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-def _baseline_shape(archetype: str, target_annual_kwh: Optional[float] = None) -> List[float]:
-    curve = ARCHETYPE_CURVES.get(archetype) or ARCHETYPE_CURVES["office"]
-    curve = list(curve)
-    if target_annual_kwh:
-        daily_kwh = sum(c * 0.5 for c in curve)
-        target_daily = target_annual_kwh / 365.0
-        if daily_kwh > 0:
-            k = target_daily / daily_kwh
-            curve = [round(c * k, 3) for c in curve]
-    return curve
+    meter_ids: List[str] = Field(..., min_length=1)
+    asset_positions: Dict[str, int] = Field(default_factory=dict)
+    active_assets: List[str] = Field(default_factory=list)
 
 
 def _meter(meter_id: str) -> dict:
@@ -90,6 +74,16 @@ def _meter(meter_id: str) -> dict:
     if not m:
         raise HTTPException(404, f"Meter {meter_id} not found")
     return m
+
+
+def _sum_shapes(shapes: List[List[float]]) -> List[float]:
+    if not shapes:
+        return [0.0] * 48
+    out = [0.0] * 48
+    for s in shapes:
+        for i, v in enumerate(s):
+            out[i] += v
+    return [round(v, 4) for v in out]
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
@@ -102,13 +96,9 @@ async def root():
 async def list_meters():
     return [
         {
-            "id": m["id"],
-            "nmi": m["nmi"],
-            "nickname": m["nickname"],
-            "archetype": m["archetype"],
-            "zone_code": m["zone_code"],
-            "zone_name": m["zone_name"],
-            "state": m["state"],
+            "id": m["id"], "nmi": m["nmi"], "nickname": m["nickname"],
+            "archetype": m["archetype"], "zone_code": m["zone_code"],
+            "zone_name": m["zone_name"], "state": m["state"],
             "annual_kwh": m["annual_kwh"],
             "current_plan_label": m["current_plan_label"],
             "monthly_spend": m["monthly_spend"],
@@ -120,19 +110,18 @@ async def list_meters():
 @app.get("/api/meters/{meter_id}")
 async def get_meter(meter_id: str):
     m = _meter(meter_id)
-    baseline = _baseline_shape(m["archetype"], m["annual_kwh"])
-    assets = SHIFT_ASSETS.get(m["archetype"], [])
     return {
         **m,
-        "baseline_shape": baseline,
-        "shift_assets": assets,
+        "baseline_shape": meter_baseline_shape(m),
+        "appliances": meter_appliances(m),
+        "shift_assets": meter_shift_assets(m),
     }
 
 
 @app.get("/api/plans")
 async def list_plans(state: Optional[str] = None):
     if state:
-        return [p for p in SAMPLE_PLANS if p["state"] == state or p["state"] == "*"]
+        return [p for p in SAMPLE_PLANS if p["state"] == state]
     return SAMPLE_PLANS
 
 
@@ -140,11 +129,8 @@ async def list_plans(state: Optional[str] = None):
 async def list_zones():
     return [
         {
-            "code": z["code"],
-            "name": name,
-            "state": z["state"],
-            "peak_buckets": z["peak"],
-            "shoulder_buckets": z["shoulder"],
+            "code": z["code"], "name": name, "state": z["state"],
+            "peak_buckets": z["peak"], "shoulder_buckets": z["shoulder"],
         }
         for name, z in TOU_ZONES.items()
     ]
@@ -152,7 +138,6 @@ async def list_zones():
 
 @app.get("/api/spot")
 async def spot_prices():
-    # Stored as $/MWh; expose as $/kWh too for charting convenience
     return {
         "region": "VIC1",
         "source": "OpenNEM-style average (existing repo data)",
@@ -164,60 +149,81 @@ async def spot_prices():
 
 @app.post("/api/rank")
 async def rank_plans(req: RankRequest):
-    m = _meter(req.meter_id)
-    baseline = _baseline_shape(m["archetype"], m["annual_kwh"])
+    meters = [_meter(mid) for mid in req.meter_ids]
 
-    # Scale incoming shape to preserve total annual energy (so cost diffs reflect
-    # SHAPE optimisation, not magnitude changes from dragging blocks around)
-    # Actually we do NOT scale — let the user see the real impact of moving load.
-    shape = list(req.shape)
-
-    ranked = []
-    for plan in SAMPLE_PLANS:
-        zone = m["zone_code"]
-        base_breakdown = annual_cost(baseline, plan, zone)
-        shift_breakdown = annual_cost(shape, plan, zone)
-        ranked.append({
-            "plan": plan,
-            "baseline_cost": base_breakdown["annual_total"],
-            "shifted_cost": shift_breakdown["annual_total"],
-            "annual_delta": round(shift_breakdown["annual_total"] - base_breakdown["annual_total"], 2),
-            "pct_delta": round(
-                (shift_breakdown["annual_total"] - base_breakdown["annual_total"])
-                / max(base_breakdown["annual_total"], 1e-9) * 100.0, 2
-            ),
-            "breakdown": shift_breakdown,
+    # Per-meter shapes
+    per_meter = []
+    for m in meters:
+        baseline = meter_baseline_shape(m)
+        shifted = shifted_shape(m, req.asset_positions, req.active_assets)
+        per_meter.append({
+            "meter_id": m["id"],
+            "zone_code": m["zone_code"],
+            "baseline_shape": baseline,
+            "shifted_shape": shifted,
         })
 
+    agg_baseline = _sum_shapes([pm["baseline_shape"] for pm in per_meter])
+    agg_shifted = _sum_shapes([pm["shifted_shape"] for pm in per_meter])
+
+    # Rank plans by SUM of per-meter cost
+    ranked = []
+    for plan in SAMPLE_PLANS:
+        sum_base = 0.0
+        sum_shift = 0.0
+        for pm, m in zip(per_meter, meters):
+            base_b = annual_cost(pm["baseline_shape"], plan, m["zone_code"])
+            shift_b = annual_cost(pm["shifted_shape"], plan, m["zone_code"])
+            sum_base += base_b["annual_total"]
+            sum_shift += shift_b["annual_total"]
+        ranked.append({
+            "plan": plan,
+            "baseline_cost": round(sum_base, 2),
+            "shifted_cost": round(sum_shift, 2),
+            "annual_delta": round(sum_shift - sum_base, 2),
+            "pct_delta": round(
+                (sum_shift - sum_base) / max(sum_base, 1e-9) * 100.0, 2
+            ),
+        })
     ranked.sort(key=lambda r: r["shifted_cost"])
 
-    stats_baseline = shape_stats(baseline, m["zone_code"])
-    stats_shifted = shape_stats(shape, m["zone_code"])
-
-    current = next((r for r in ranked if r["plan"]["id"] == m["current_plan_id"]), ranked[0])
+    # Pick a representative "current" — first meter's current plan (most natural
+    # in single-select; for multi we report the same plan id and use sum cost)
+    current_plan_id = meters[0]["current_plan_id"]
+    current = next((r for r in ranked if r["plan"]["id"] == current_plan_id), ranked[0])
     best = ranked[0]
     achievable_saving = round(current["shifted_cost"] - best["shifted_cost"], 2)
 
+    # Aggregated stats — use the most common zone for TOU-band classification of the agg curve
+    agg_zone = max(
+        {m["zone_code"] for m in meters},
+        key=lambda z: sum(1 for m in meters if m["zone_code"] == z),
+    )
+
     return {
-        "meter_id": req.meter_id,
+        "meter_ids": req.meter_ids,
+        "n_sites": len(meters),
         "ranked": ranked,
-        "current_plan_id": m["current_plan_id"],
+        "current_plan_id": current_plan_id,
         "current": current,
         "best": best,
         "achievable_saving": achievable_saving,
-        "stats": {
-            "baseline": stats_baseline,
-            "shifted": stats_shifted,
+        "shape": {
+            "baseline": agg_baseline,
+            "shifted": agg_shifted,
         },
+        "stats": {
+            "baseline": shape_stats(agg_baseline, agg_zone),
+            "shifted": shape_stats(agg_shifted, agg_zone),
+        },
+        "per_meter": per_meter,
+        "agg_zone": agg_zone,
     }
 
 
 @app.post("/api/refresh-cdr")
 async def refresh_cdr():
-    """
-    Best-effort fetch from the AER CDR public Energy Product Reference Data API.
-    Records counts only; does not mutate the in-process seed plans for stability.
-    """
+    """Best-effort live fetch from AER CDR — reports status only."""
     retailers = ["agl", "originenergy", "energyaustralia", "redenergy", "alintaenergy"]
     base = "https://cdr.energymadeeasy.gov.au"
     headers = {"x-v": "3", "Accept": "application/json"}
@@ -227,11 +233,10 @@ async def refresh_cdr():
             try:
                 resp = await cli.get(f"{base}/{r}/cds-au/v1/energy/plans?page-size=10")
                 if resp.status_code == 200:
-                    data = resp.json()
-                    plans = data.get("data", {}).get("plans", [])
-                    results[r] = {"status": "ok", "count": len(plans), "first": plans[:2]}
+                    plans = resp.json().get("data", {}).get("plans", [])
+                    results[r] = {"status": "ok", "count": len(plans)}
                 else:
                     results[r] = {"status": "http_error", "code": resp.status_code}
             except Exception as exc:  # noqa: BLE001
                 results[r] = {"status": "exception", "detail": str(exc)}
-    return {"queried": retailers, "results": results, "note": "Live AER CDR. Plans are not auto-merged in MVP."}
+    return {"queried": retailers, "results": results}

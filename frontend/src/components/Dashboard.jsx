@@ -1,38 +1,43 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Zap, RefreshCw } from "lucide-react";
-import { api } from "../lib/api";
+import { Zap, RefreshCw, Layers } from "lucide-react";
+import { api, fmtNumber } from "../lib/api";
 import MeterRail from "./MeterRail";
 import StatStrip from "./StatStrip";
 import LoadCanvas from "./LoadCanvas";
 import ShiftLibrary from "./ShiftLibrary";
 import PlanStrip from "./PlanStrip";
 
-function applyAssetDeltas(baseline, assets, activeIds, { clampDisplay = false } = {}) {
+function applyAssetDeltas(baseline, shiftAssets, assetPositions, activeIds) {
   const out = baseline.slice();
-  assets.forEach((a) => {
+  shiftAssets.forEach((a) => {
     if (!activeIds.includes(a.id)) return;
-    if (a.current_start === a.default_start) return;
+    const curStart = assetPositions[a.id] ?? a.default_start;
+    if (curStart === a.default_start) return;
     for (let i = a.default_start; i < a.default_start + a.duration; i++) {
       if (i >= 0 && i < 48) out[i] = out[i] - a.power;
     }
-    for (let i = a.current_start; i < a.current_start + a.duration; i++) {
+    for (let i = curStart; i < curStart + a.duration; i++) {
       if (i >= 0 && i < 48) out[i] = out[i] + a.power;
     }
   });
-  if (clampDisplay) return out.map((v) => Math.max(0, v));
+  return out;
+}
+
+function sumShapes(shapes) {
+  const out = new Array(48).fill(0);
+  shapes.forEach((s) => s.forEach((v, i) => { out[i] += v; }));
   return out;
 }
 
 export default function Dashboard() {
   const [meters, setMeters] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-  const [meter, setMeter] = useState(null);
-  const [assets, setAssets] = useState([]);
-  const [activeIds, setActiveIds] = useState([]);
+  const [metersById, setMetersById] = useState({}); // id → full meter detail
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [assetPositions, setAssetPositions] = useState({}); // assetId → currentStart
+  const [activeIds, setActiveIds] = useState([]); // active asset ids
   const [zones, setZones] = useState([]);
   const [spot, setSpot] = useState(null);
   const [rankData, setRankData] = useState(null);
-  const [loading, setLoading] = useState(false);
 
   // ── boot ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -45,64 +50,112 @@ export default function Dashboard() {
       setMeters(mRes.data);
       setZones(zRes.data);
       setSpot(sRes.data);
-      if (mRes.data.length) setSelectedId(mRes.data[0].id);
+      if (mRes.data.length) setSelectedIds([mRes.data[0].id]);
+      // Eagerly fetch every meter's detail (small + parallel)
+      const details = await Promise.all(
+        mRes.data.map((m) => api.get(`/meters/${m.id}`).then((r) => r.data))
+      );
+      const map = {};
+      details.forEach((d) => { map[d.id] = d; });
+      setMetersById(map);
+      // Initialise asset positions + active set from the first meter's assets
+      if (details.length) {
+        const first = details[0];
+        const positions = {};
+        first.shift_assets.forEach((a) => { positions[a.id] = a.default_start; });
+        setAssetPositions(positions);
+        setActiveIds(first.shift_assets.filter((a) => a.feasibility !== "hard").map((a) => a.id));
+      }
     })();
   }, []);
 
-  // ── load selected meter ────────────────────────────────────────────
-  useEffect(() => {
-    if (!selectedId) return;
-    setLoading(true);
-    api.get(`/meters/${selectedId}`).then((res) => {
-      setMeter(res.data);
-      const initialAssets = (res.data.shift_assets || []).map((a) => ({
-        ...a,
-        current_start: a.default_start,
-      }));
-      setAssets(initialAssets);
-      // Default: activate the easy & medium ones so the canvas shows blocks immediately
-      setActiveIds(initialAssets.filter((a) => a.feasibility !== "hard").map((a) => a.id));
-      setLoading(false);
-    });
-  }, [selectedId]);
+  // ── selection helpers ──────────────────────────────────────────────
+  const selectMeter = useCallback((id, additive) => {
+    if (additive) {
+      setSelectedIds((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      );
+    } else {
+      setSelectedIds([id]);
+    }
+  }, []);
 
-  const baseline = meter?.baseline_shape || Array(48).fill(0);
-  const shape = useMemo(
-    () => applyAssetDeltas(baseline, assets, activeIds, { clampDisplay: false }),
-    [baseline, assets, activeIds]
+  const selectAll = useCallback(() => {
+    setSelectedIds(meters.map((m) => m.id));
+  }, [meters]);
+
+  // Ensure at least one meter selected
+  useEffect(() => {
+    if (selectedIds.length === 0 && meters.length) {
+      setSelectedIds([meters[0].id]);
+    }
+  }, [selectedIds, meters]);
+
+  // ── derived shapes (client-side optimistic) ────────────────────────
+  const selectedMeters = useMemo(
+    () => selectedIds.map((id) => metersById[id]).filter(Boolean),
+    [selectedIds, metersById]
+  );
+
+  // The shift library is the union of shiftable assets across selected meters.
+  // For our cafe chain they're identical, so just take the first.
+  const shiftAssets = useMemo(() => {
+    if (!selectedMeters.length) return [];
+    return selectedMeters[0].shift_assets || [];
+  }, [selectedMeters]);
+
+  // Per-meter shapes
+  const perMeterShapes = useMemo(() => {
+    return selectedMeters.map((m) => {
+      const baseline = m.baseline_shape || new Array(48).fill(0);
+      const shifted = applyAssetDeltas(baseline, m.shift_assets || [], assetPositions, activeIds);
+      return { baseline, shifted };
+    });
+  }, [selectedMeters, assetPositions, activeIds]);
+
+  const aggBaseline = useMemo(
+    () => sumShapes(perMeterShapes.map((p) => p.baseline)),
+    [perMeterShapes]
+  );
+  const aggShifted = useMemo(
+    () => sumShapes(perMeterShapes.map((p) => p.shifted)),
+    [perMeterShapes]
   );
   const displayShape = useMemo(
-    () => shape.map((v) => Math.max(0, v)),
-    [shape]
-  );
-  const activeAssets = useMemo(
-    () => assets.filter((a) => activeIds.includes(a.id)),
-    [assets, activeIds]
+    () => aggShifted.map((v) => Math.max(0, v)),
+    [aggShifted]
   );
 
-  // ── debounced ranking ───────────────────────────────────────────────
+  const activeAssetsWithPositions = useMemo(
+    () => shiftAssets
+      .filter((a) => activeIds.includes(a.id))
+      .map((a) => ({ ...a, current_start: assetPositions[a.id] ?? a.default_start })),
+    [shiftAssets, activeIds, assetPositions]
+  );
+
+  // ── debounced ranking call ─────────────────────────────────────────
   const rankTimer = useRef(null);
   useEffect(() => {
-    if (!selectedId || !shape.length) return;
+    if (!selectedIds.length || !shiftAssets.length) return;
     clearTimeout(rankTimer.current);
     rankTimer.current = setTimeout(async () => {
       try {
         const { data } = await api.post("/rank", {
-          meter_id: selectedId,
-          shape,
+          meter_ids: selectedIds,
+          asset_positions: assetPositions,
+          active_assets: activeIds,
         });
         setRankData(data);
       } catch (e) {
         console.error("rank failed", e);
       }
-    }, 120);
+    }, 140);
     return () => clearTimeout(rankTimer.current);
-  }, [selectedId, shape]);
+  }, [selectedIds, assetPositions, activeIds, shiftAssets.length]);
 
+  // ── handlers ───────────────────────────────────────────────────────
   const onAssetMove = useCallback((id, newStart) => {
-    setAssets((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, current_start: newStart } : a))
-    );
+    setAssetPositions((prev) => ({ ...prev, [id]: newStart }));
   }, []);
 
   const onToggle = useCallback((id) => {
@@ -112,39 +165,57 @@ export default function Dashboard() {
   }, []);
 
   const onReset = useCallback((id) => {
-    setAssets((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, current_start: a.default_start } : a))
-    );
-  }, []);
+    const a = shiftAssets.find((x) => x.id === id);
+    if (!a) return;
+    setAssetPositions((prev) => ({ ...prev, [id]: a.default_start }));
+  }, [shiftAssets]);
 
   const onResetAll = useCallback(() => {
-    setAssets((prev) => prev.map((a) => ({ ...a, current_start: a.default_start })));
-  }, []);
+    const positions = {};
+    shiftAssets.forEach((a) => { positions[a.id] = a.default_start; });
+    setAssetPositions(positions);
+  }, [shiftAssets]);
 
   const zone = useMemo(() => {
-    if (!meter || !zones.length) return null;
-    return zones.find((z) => z.code === meter.zone_code);
-  }, [meter, zones]);
+    if (!selectedMeters.length || !zones.length) return null;
+    // Use first meter's zone for the TOU band wash. In multi-zone aggregation
+    // we still show a representative band (cleaner than a striped union).
+    return zones.find((z) => z.code === selectedMeters[0].zone_code);
+  }, [selectedMeters, zones]);
 
-  const totalMoved = activeAssets.filter((a) => a.current_start !== a.default_start).length;
+  const totalMoved = activeAssetsWithPositions.filter(
+    (a) => a.current_start !== a.default_start
+  ).length;
+
+  const isMulti = selectedIds.length > 1;
+  const aggAnnualKwh = selectedMeters.reduce((s, m) => s + (m.annual_kwh || 0), 0);
+  const title = isMulti
+    ? `Aggregated · ${selectedIds.length} sites · ${fmtNumber(aggAnnualKwh / 1000, 1)} MWh/yr`
+    : selectedMeters[0]
+      ? `${selectedMeters[0].nickname} · ${selectedMeters[0].zone_name}`
+      : "Live load dashboard";
 
   return (
     <div className="flex min-h-screen">
-      <MeterRail meters={meters} selectedId={selectedId} onSelect={setSelectedId} />
+      <MeterRail
+        meters={meters}
+        selectedIds={selectedIds}
+        onSelect={selectMeter}
+        onSelectAll={selectAll}
+      />
 
       <main className="flex-1 min-w-0 flex flex-col">
-        {/* Top bar */}
         <header className="flex items-center justify-between gap-4 border-b border-line bg-white px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent">
-              <Zap size={18} strokeWidth={2.5} />
+              {isMulti ? <Layers size={18} strokeWidth={2.5} /> : <Zap size={18} strokeWidth={2.5} />}
             </div>
             <div>
               <div className="text-[11px] uppercase tracking-wider text-ink-mute">
-                Load Shape Lab
+                Load Shape Lab · cafe chain portfolio
               </div>
               <div className="text-[15px] font-semibold tracking-tightish text-ink">
-                {meter ? `${meter.nickname} · ${meter.zone_name}` : "Live load dashboard"}
+                {title}
               </div>
             </div>
           </div>
@@ -170,35 +241,55 @@ export default function Dashboard() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1500px] px-6 py-5 space-y-5">
-            {/* Stat strip */}
+            {isMulti && (
+              <div
+                data-testid="aggregation-banner"
+                className="rounded-xl border border-accent/30 bg-accent/[0.04] px-4 py-3 flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Layers size={16} className="text-accent" strokeWidth={2.5} />
+                  <div>
+                    <div className="text-[12.5px] font-semibold text-ink">
+                      Portfolio view · {selectedIds.length} sites aggregated
+                    </div>
+                    <div className="text-[11.5px] text-ink-mute">
+                      Shifts apply chain-wide. Each plan is ranked by sum of per-site cost on its own distribution zone.
+                    </div>
+                  </div>
+                </div>
+                <div className="text-[11px] tabnum text-ink-soft">
+                  {selectedMeters.map((m) => m.nickname).join(" · ")}
+                </div>
+              </div>
+            )}
+
             {rankData && <StatStrip stats={rankData.stats} ranked={rankData} />}
 
-            {/* Canvas + library */}
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
-              {loading || !meter ? (
+              {!selectedMeters.length ? (
                 <div className="rounded-xl border border-line bg-white h-[360px] flex items-center justify-center text-ink-mute text-[13px]">
-                  Loading meter…
+                  Loading meters…
                 </div>
               ) : (
                 <LoadCanvas
                   shape={displayShape}
-                  baseline={baseline}
+                  baseline={aggBaseline}
                   zone={zone}
                   spot={spot}
-                  activeAssets={activeAssets}
+                  activeAssets={activeAssetsWithPositions}
                   onAssetMove={onAssetMove}
-                  onAssetRemove={onToggle}
+                  multiSiteCount={isMulti ? selectedIds.length : 0}
                 />
               )}
               <ShiftLibrary
-                assets={assets}
+                assets={shiftAssets.map((a) => ({ ...a, current_start: assetPositions[a.id] ?? a.default_start }))}
                 activeIds={activeIds}
                 onToggle={onToggle}
                 onReset={onReset}
+                multiSiteCount={isMulti ? selectedIds.length : 0}
               />
             </div>
 
-            {/* Plan strip */}
             {rankData && (
               <PlanStrip
                 ranked={rankData.ranked}
@@ -209,8 +300,8 @@ export default function Dashboard() {
 
             <footer className="pt-2 pb-6 text-[11px] text-ink-mute">
               Retailer plans modeled on the AER CDR public Energy Product Reference Data API.
-              Spot price overlay sourced from VIC1 NEM half-hourly RRP averages (existing repo dataset).
-              Demo mode · no auth.
+              Load shapes composed as a sum of appliance-level profiles (fridges, espresso, ovens, HVAC, lighting,
+              dishwasher, hot water, misc) — shifts move only the shiftable components. Demo · no auth.
             </footer>
           </div>
         </div>
