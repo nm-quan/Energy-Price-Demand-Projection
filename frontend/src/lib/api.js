@@ -1,21 +1,9 @@
 import axios from 'axios';
-import { getToken } from './auth';
 
 const api = axios.create({
   baseURL: 'http://localhost:8001',
   timeout: 30000,
 });
-
-api.interceptors.request.use((config) => {
-  const token = getToken();
-  if (token) {
-    config.headers['Authorization'] = `Bearer ${token}`;
-  }
-  return config;
-});
-
-export const login = (email, password) => api.post('/api/auth/login', { email, password });
-export const getMe = () => api.get('/api/auth/me');
 
 export const getClients = () => api.get('/api/clients');
 export const createClient = (data) => api.post('/api/clients', data);

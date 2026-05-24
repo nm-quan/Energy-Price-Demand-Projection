@@ -28,15 +28,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
 
 import data_store
-from auth import authenticate_broker, create_token, get_current_broker
 from models import (
-    LoginRequest,
-    Broker,
-    TokenResponse,
     Client,
     ClientCreate,
     IntervalRecord,
@@ -203,42 +199,20 @@ def health_check():
     return {"status": "ok"}
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-@app.post("/api/auth/login")
-def login(req: LoginRequest):
-    broker = authenticate_broker(req.email, req.password)
-    if broker is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
-    token = create_token(broker.id)
-    return {"token": token, "broker": broker.model_dump()}
-
-
-@app.get("/api/auth/me")
-def get_me(broker: Broker = Depends(get_current_broker)):
-    return broker.model_dump()
-
-
 # ── Clients ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/clients")
-def list_clients(broker: Broker = Depends(get_current_broker)):
-    return [
-        c for c in data_store.clients.values()
-        if c.get("broker_id") == broker.id
-    ]
+def list_clients():
+    return list(data_store.clients.values())
 
 
 @app.post("/api/clients", status_code=201)
-def create_client(body: ClientCreate, broker: Broker = Depends(get_current_broker)):
+def create_client(body: ClientCreate):
     client_id = f"client-{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc).isoformat()
     client = {
         "id": client_id,
-        "broker_id": broker.id,
+        "broker_id": "broker-1",
         "name": body.name,
         "address": body.address,
         "nmi": body.nmi,
@@ -257,9 +231,9 @@ def create_client(body: ClientCreate, broker: Broker = Depends(get_current_broke
 
 
 @app.get("/api/clients/{client_id}")
-def get_client(client_id: str, broker: Broker = Depends(get_current_broker)):
+def get_client(client_id: str):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
     return client
 
@@ -270,10 +244,9 @@ def get_client(client_id: str, broker: Broker = Depends(get_current_broker)):
 async def upload_intervals(
     client_id: str,
     file: UploadFile = File(...),
-    broker: Broker = Depends(get_current_broker),
 ):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     content = await file.read()
@@ -303,12 +276,9 @@ async def upload_intervals(
 
 
 @app.get("/api/clients/{client_id}/intervals/summary")
-def intervals_summary(
-    client_id: str,
-    broker: Broker = Depends(get_current_broker),
-):
+def intervals_summary(client_id: str):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     intervals = data_store.interval_data.get(client_id)
@@ -330,13 +300,9 @@ def intervals_summary(
 # ── Tariff assignment ─────────────────────────────────────────────────────────
 
 @app.put("/api/clients/{client_id}/tariff")
-def assign_tariff(
-    client_id: str,
-    body: TariffAssign,
-    broker: Broker = Depends(get_current_broker),
-):
+def assign_tariff(client_id: str, body: TariffAssign):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     if body.tariff_id not in data_store.tariffs:
@@ -353,12 +319,12 @@ def assign_tariff(
 # ── Tariffs ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/tariffs")
-def list_tariffs(broker: Broker = Depends(get_current_broker)):
+def list_tariffs():
     return list(data_store.tariffs.values())
 
 
 @app.post("/api/tariffs", status_code=201)
-def create_tariff(body: Tariff, broker: Broker = Depends(get_current_broker)):
+def create_tariff(body: Tariff):
     # Generate ID if not provided or if it conflicts
     if not body.id or body.id in data_store.tariffs:
         body = body.model_copy(update={"id": f"tariff-{uuid.uuid4().hex[:8]}"})
@@ -403,12 +369,9 @@ def _get_client_tariff(client_id: str) -> Optional[Tariff]:
 
 
 @app.get("/api/clients/{client_id}/baseline")
-def get_baseline(
-    client_id: str,
-    broker: Broker = Depends(get_current_broker),
-):
+def get_baseline(client_id: str):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     tariff = _get_client_tariff(client_id)
@@ -437,18 +400,14 @@ def get_baseline(
 # ── Scenarios ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/scenarios/library")
-def get_scenario_library(broker: Broker = Depends(get_current_broker)):
+def get_scenario_library():
     return SCENARIO_LIBRARY
 
 
 @app.post("/api/clients/{client_id}/scenarios/run")
-def run_client_scenarios(
-    client_id: str,
-    body: ScenarioRunRequest,
-    broker: Broker = Depends(get_current_broker),
-):
+def run_client_scenarios(client_id: str, body: ScenarioRunRequest):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     tariff = _get_client_tariff(client_id)
@@ -483,12 +442,9 @@ def run_client_scenarios(
 # ── Report ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/clients/{client_id}/report")
-def get_report(
-    client_id: str,
-    broker: Broker = Depends(get_current_broker),
-):
+def get_report(client_id: str):
     client = data_store.clients.get(client_id)
-    if client is None or client.get("broker_id") != broker.id:
+    if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
 
     tariff = _get_client_tariff(client_id)
