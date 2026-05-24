@@ -1,13 +1,12 @@
 import React from "react";
 import { fmtCurrency, fmtNumber, fmtPct } from "../lib/api";
-import { TrendingDown, TrendingUp } from "lucide-react";
 
 function StatCard({ label, value, sub, accent = false, testId }) {
   return (
     <div
       data-testid={testId}
       className={`flex flex-col justify-between rounded-xl border bg-white px-5 py-4 ${
-        accent ? "border-accent/40 ring-1 ring-accent/15" : "border-line"
+        accent ? "border-lime ring-2 ring-lime/30" : "border-line"
       }`}
     >
       <div className="text-[10.5px] uppercase tracking-[0.08em] font-semibold text-ink-mute">
@@ -62,8 +61,7 @@ export default function StatStrip({ rank }) {
         label="Achievable saving"
         value={fmtCurrency(saving)}
         sub={
-          <span className="inline-flex items-center gap-1 text-[11.5px] font-medium tabnum text-emerald-600">
-            <TrendingDown size={12} strokeWidth={2.5} />
+          <span className="text-[11.5px] font-medium tabnum text-emerald-600">
             {fmtPct(savingPct / 100, 1)} vs current
           </span>
         }

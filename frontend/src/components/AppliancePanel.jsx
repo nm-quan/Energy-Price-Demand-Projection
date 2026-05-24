@@ -1,33 +1,59 @@
 import React from "react";
+import { Lock, Minus, Plus } from "lucide-react";
 import { fmtNumber } from "../lib/api";
-import { Lock } from "lucide-react";
 
-function ApplianceChip({ appliance, active, onToggle }) {
+const SCALE_STEPS = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+function nearestStep(v) {
+  let best = SCALE_STEPS[0];
+  let bestD = Math.abs(v - best);
+  SCALE_STEPS.forEach((s) => {
+    const d = Math.abs(v - s);
+    if (d < bestD) { best = s; bestD = d; }
+  });
+  return best;
+}
+
+function stepUp(v) {
+  const s = nearestStep(v);
+  const i = SCALE_STEPS.indexOf(s);
+  return SCALE_STEPS[Math.min(SCALE_STEPS.length - 1, i + 1)];
+}
+
+function stepDown(v) {
+  const s = nearestStep(v);
+  const i = SCALE_STEPS.indexOf(s);
+  return SCALE_STEPS[Math.max(0, i - 1)];
+}
+
+function ApplianceRow({ appliance, scale, onChange }) {
   const locked = appliance.always_on;
-  const isOn = active || locked;
+  const minScale = locked ? 1.0 : 0;  // fridges can't be turned off
+  const isOn = scale > 0;
+  const pct = Math.round(scale * 100);
+
+  const stepDownClamped = () => {
+    const next = stepDown(scale);
+    onChange(appliance.id, Math.max(minScale, next));
+  };
+  const stepUpClamped = () => {
+    onChange(appliance.id, stepUp(scale));
+  };
+
   return (
-    <button
-      type="button"
-      data-testid={`appliance-chip-${appliance.id}`}
-      onClick={() => !locked && onToggle(appliance.id)}
-      disabled={locked}
-      title={appliance.note}
-      className={`group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition ${
-        isOn
-          ? "border-line bg-white hover:border-ink-mute"
-          : "border-line bg-surface opacity-60 hover:opacity-100"
-      } ${locked ? "cursor-default" : "cursor-pointer"}`}
+    <div
+      data-testid={`appliance-row-${appliance.id}`}
+      className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 transition ${
+        isOn ? "border-line bg-white" : "border-line bg-surface"
+      }`}
     >
       <span
-        className="inline-block h-3 w-3 shrink-0 rounded-sm transition-opacity"
-        style={{
-          background: appliance.color,
-          opacity: isOn ? 1 : 0.25,
-        }}
+        className="inline-block h-3.5 w-3.5 shrink-0 rounded-sm transition-opacity"
+        style={{ background: appliance.color, opacity: isOn ? 1 : 0.25 }}
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1">
-          <div className="truncate text-[12.5px] font-semibold text-ink leading-tight">
+          <div className="truncate text-[13px] font-semibold text-ink leading-tight">
             {appliance.name}
           </div>
           {locked && <Lock size={9} className="shrink-0 text-ink-mute" strokeWidth={2.5} />}
@@ -36,22 +62,43 @@ function ApplianceChip({ appliance, active, onToggle }) {
           {fmtNumber(appliance.daily_kwh, 1)} kWh/day
         </div>
       </div>
-      <div
-        className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
-          isOn ? "bg-accent" : "bg-slate-300"
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-            isOn ? "translate-x-3.5" : "translate-x-0.5"
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          data-testid={`appliance-down-${appliance.id}`}
+          type="button"
+          onClick={stepDownClamped}
+          disabled={scale <= minScale}
+          className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-line text-ink-soft transition ${
+            scale <= minScale ? "opacity-30 cursor-not-allowed" : "hover:border-ink-soft hover:text-ink"
           }`}
-        />
+        >
+          <Minus size={12} strokeWidth={2.5} />
+        </button>
+        <div
+          data-testid={`appliance-value-${appliance.id}`}
+          className={`tabnum w-12 text-center text-[12px] font-semibold ${
+            isOn ? "text-ink" : "text-ink-mute"
+          }`}
+        >
+          {pct}%
+        </div>
+        <button
+          data-testid={`appliance-up-${appliance.id}`}
+          type="button"
+          onClick={stepUpClamped}
+          disabled={scale >= 2.0}
+          className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-line text-ink-soft transition ${
+            scale >= 2.0 ? "opacity-30 cursor-not-allowed" : "hover:border-ink-soft hover:text-ink"
+          }`}
+        >
+          <Plus size={12} strokeWidth={2.5} />
+        </button>
       </div>
-    </button>
+    </div>
   );
 }
 
-export default function AppliancePanel({ appliances, activeIds, onToggle }) {
+export default function AppliancePanel({ appliances, scales, onChange }) {
   if (!appliances?.length) return null;
   return (
     <div data-testid="appliance-panel" className="rounded-xl border border-line bg-white">
@@ -63,16 +110,16 @@ export default function AppliancePanel({ appliances, activeIds, onToggle }) {
           </h3>
         </div>
         <div className="text-[11px] text-ink-mute">
-          Total load = sum of enabled appliances
+          Total load = sum of all appliances · adjust with − / + to model upgrades
         </div>
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 px-3 pb-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 px-3 pb-3">
         {appliances.map((a) => (
-          <ApplianceChip
+          <ApplianceRow
             key={a.id}
             appliance={a}
-            active={activeIds.includes(a.id) || a.always_on}
-            onToggle={onToggle}
+            scale={scales[a.id] ?? 1.0}
+            onChange={onChange}
           />
         ))}
       </div>

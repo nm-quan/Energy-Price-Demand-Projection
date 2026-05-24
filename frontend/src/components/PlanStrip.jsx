@@ -1,12 +1,11 @@
 import React from "react";
-import { Sparkles, ArrowDownRight } from "lucide-react";
 import { fmtCurrency, fmtNumber } from "../lib/api";
 
 function PlanCard({ entry, isCurrent, isBest, rank }) {
   const { plan, baseline_cost, shifted_cost, annual_delta, pct_delta } = entry;
   const improved = shifted_cost < baseline_cost;
   const borderCls = isBest
-    ? "border-emerald-400 ring-1 ring-emerald-300/40 bg-emerald-50/30"
+    ? "border-lime ring-2 ring-lime/30 bg-lime-soft/30"
     : isCurrent
       ? "border-accent ring-1 ring-accent/30 bg-accent/[0.04]"
       : "border-line bg-white";
@@ -23,12 +22,12 @@ function PlanCard({ entry, isCurrent, isBest, rank }) {
               #{rank}
             </span>
             {isBest && (
-              <span className="inline-flex items-center gap-0.5 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-emerald-700">
-                <Sparkles size={9} strokeWidth={2.5} /> Best
+              <span className="rounded-md bg-lime px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-forest">
+                Best
               </span>
             )}
             {isCurrent && !isBest && (
-              <span className="inline-flex items-center rounded-md bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-accent">
+              <span className="rounded-md bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-accent">
                 Current
               </span>
             )}
@@ -52,9 +51,8 @@ function PlanCard({ entry, isCurrent, isBest, rank }) {
             {fmtCurrency(shifted_cost)}
           </span>
           {improved && annual_delta !== 0 && (
-            <span className="inline-flex items-center gap-0.5 text-[11px] font-medium tabnum text-emerald-600">
-              <ArrowDownRight size={11} strokeWidth={2.5} />
-              {fmtCurrency(Math.abs(annual_delta))}
+            <span className="text-[11px] font-medium tabnum text-emerald-600">
+              −{fmtCurrency(Math.abs(annual_delta))}
             </span>
           )}
         </div>
@@ -69,9 +67,6 @@ function PlanCard({ entry, isCurrent, isBest, rank }) {
         <div className="truncate" title={plan.fragility}>
           {plan.fragility}
         </div>
-        <div className="mt-0.5 text-[9.5px] truncate">
-          {plan.source}
-        </div>
       </div>
     </div>
   );
@@ -83,13 +78,13 @@ export default function PlanStrip({ ranked, currentId, bestId }) {
     <section data-testid="plan-strip" className="rounded-xl border border-line bg-white">
       <div className="flex items-center justify-between px-6 pt-5 pb-2">
         <div>
-          <div className="eyebrow">Live retailer deals</div>
+          <div className="eyebrow">Retailer plans</div>
           <h3 className="mt-0.5 text-[15px] font-semibold tracking-tightish text-ink">
-            Retailer plans ranked
+            Ranked by annual cost on your current load
           </h3>
         </div>
         <div className="text-[11px] text-ink-mute">
-          {ranked.length} plans · sorted by annual cost
+          {ranked.length} plans
         </div>
       </div>
       <div className="overflow-x-auto no-scrollbar snap-strip px-6 pb-5">

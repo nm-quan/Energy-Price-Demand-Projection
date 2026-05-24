@@ -64,7 +64,7 @@ app.add_middleware(
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 class RankRequest(BaseModel):
     meter_ids: List[str] = Field(..., min_length=1)
-    active_appliances: List[str] = Field(default_factory=list)
+    appliance_scales: Dict[str, float] = Field(default_factory=dict)
 
 
 def _meter(meter_id: str) -> dict:
@@ -162,8 +162,10 @@ async def rank_plans(req: RankRequest):
             for i, v in enumerate(a["profile"]):
                 per_appliance_profiles[a["id"]][i] += v
 
-    # Determine which appliances are active (default: all on if list empty)
-    active = list(req.active_appliances) if req.active_appliances else appliance_order
+    # Determine effective scales (default 1.0 for any unspecified appliance)
+    scales: Dict[str, float] = {}
+    for aid in appliance_order:
+        scales[aid] = float(req.appliance_scales.get(aid, 1.0))
 
     # Build per-meter shapes (active and full)
     per_meter = []
@@ -171,7 +173,7 @@ async def rank_plans(req: RankRequest):
     active_shapes: List[List[float]] = []
     for m in meters:
         full = meter_baseline_shape(m)
-        active_s = meter_active_shape(m, active)
+        active_s = meter_active_shape(m, scales)
         full_shapes.append(full)
         active_shapes.append(active_s)
         per_meter.append({
@@ -187,7 +189,8 @@ async def rank_plans(req: RankRequest):
     appliance_breakdown = []
     for aid in appliance_order:
         meta = appliance_meta[aid]
-        prof = [round(v, 4) for v in per_appliance_profiles[aid]]
+        scale = scales[aid]
+        prof = [round(v * scale, 4) for v in per_appliance_profiles[aid]]
         appliance_breakdown.append({
             "id": aid,
             "name": meta["name"],
@@ -196,7 +199,8 @@ async def rank_plans(req: RankRequest):
             "note": meta.get("note", ""),
             "profile": prof,
             "daily_kwh": round(sum(prof) * 0.5, 2),
-            "active": aid in active,
+            "scale": scale,
+            "active": scale > 0,
         })
 
     # Rank plans by sum of per-meter cost on each meter's distribution zone,
@@ -232,7 +236,7 @@ async def rank_plans(req: RankRequest):
     return {
         "meter_ids": req.meter_ids,
         "n_sites": len(meters),
-        "active_appliances": active,
+        "appliance_scales": scales,
         "appliance_breakdown": appliance_breakdown,
         "shape": {
             "full": agg_full,

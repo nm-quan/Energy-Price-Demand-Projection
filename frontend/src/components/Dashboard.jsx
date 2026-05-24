@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Zap, Layers, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { api, fmtNumber } from "../lib/api";
 import MeterRail from "./MeterRail";
 import StatStrip from "./StatStrip";
@@ -7,19 +7,24 @@ import LoadCanvas from "./LoadCanvas";
 import AppliancePanel from "./AppliancePanel";
 import PlanStrip from "./PlanStrip";
 
-const DEFAULT_APPLIANCES = [
+const APPLIANCE_IDS = [
   "fridges", "espresso", "ovens", "hvac",
   "lighting", "dishwasher", "hot-water", "misc",
 ];
 
+function defaultScales() {
+  const o = {};
+  APPLIANCE_IDS.forEach((id) => { o[id] = 1.0; });
+  return o;
+}
+
 export default function Dashboard() {
   const [meters, setMeters] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
-  const [activeAppliances, setActiveAppliances] = useState(DEFAULT_APPLIANCES);
+  const [scales, setScales] = useState(defaultScales);
   const [zones, setZones] = useState([]);
   const [rankData, setRankData] = useState(null);
 
-  // ── boot ────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const [mRes, zRes] = await Promise.all([
@@ -54,7 +59,6 @@ export default function Dashboard() {
     }
   }, [selectedIds, meters]);
 
-  // ── debounced rank request ─────────────────────────────────────────
   const rankTimer = useRef(null);
   useEffect(() => {
     if (!selectedIds.length) return;
@@ -63,7 +67,7 @@ export default function Dashboard() {
       try {
         const { data } = await api.post("/rank", {
           meter_ids: selectedIds,
-          active_appliances: activeAppliances,
+          appliance_scales: scales,
         });
         setRankData(data);
       } catch (e) {
@@ -71,19 +75,16 @@ export default function Dashboard() {
       }
     }, 120);
     return () => clearTimeout(rankTimer.current);
-  }, [selectedIds, activeAppliances]);
+  }, [selectedIds, scales]);
 
-  const onToggleAppliance = useCallback((id) => {
-    setActiveAppliances((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
+  const onScaleChange = useCallback((id, value) => {
+    setScales((prev) => ({ ...prev, [id]: value }));
   }, []);
 
-  const onResetAppliances = useCallback(() => {
-    setActiveAppliances(DEFAULT_APPLIANCES);
+  const onResetAll = useCallback(() => {
+    setScales(defaultScales());
   }, []);
 
-  // ── derived ─────────────────────────────────────────────────────────
   const selectedMeters = useMemo(
     () => selectedIds.map((id) => meters.find((m) => m.id === id)).filter(Boolean),
     [selectedIds, meters]
@@ -96,8 +97,7 @@ export default function Dashboard() {
 
   const activeApplianceObjs = useMemo(() => {
     if (!rankData) return [];
-    // For the chart, return only active appliances IN order (preserves stack order).
-    return rankData.appliance_breakdown.filter((a) => a.active || a.always_on);
+    return rankData.appliance_breakdown.filter((a) => a.active);
   }, [rankData]);
 
   const isMulti = selectedIds.length > 1;
@@ -105,16 +105,15 @@ export default function Dashboard() {
   const title = isMulti
     ? `${selectedIds.length} sites · ${fmtNumber(aggAnnualKwh / 1000, 1)} MWh/yr`
     : selectedMeters[0]
-      ? `${selectedMeters[0].nickname}`
+      ? selectedMeters[0].nickname
       : "Loading…";
-
   const subtitle = isMulti
-    ? "Aggregated portfolio · chain-wide load"
+    ? "Aggregated portfolio"
     : selectedMeters[0]
       ? `${selectedMeters[0].zone_name} · ${fmtNumber((selectedMeters[0].annual_kwh || 0) / 1000, 1)} MWh/yr`
       : "";
 
-  const dirty = activeAppliances.length !== DEFAULT_APPLIANCES.length;
+  const dirty = APPLIANCE_IDS.some((id) => (scales[id] ?? 1.0) !== 1.0);
 
   return (
     <div className="flex min-h-screen">
@@ -126,32 +125,28 @@ export default function Dashboard() {
       />
 
       <main className="flex-1 min-w-0 flex flex-col">
-        <header className="flex items-center justify-between gap-4 border-b border-line bg-white px-7 py-4">
-          <div className="flex items-center gap-3">
-            <div className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-accent text-white">
-              {isMulti ? <Layers size={18} strokeWidth={2.5} /> : <Zap size={18} strokeWidth={2.5} />}
+        {/* Termina-style dark teal header */}
+        <header className="flex items-center justify-between gap-4 bg-forest px-7 py-4 text-white">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.18em] font-semibold text-mint/80">
+              Load Shape Lab
             </div>
-            <div>
-              <div className="text-[10.5px] uppercase tracking-[0.12em] font-semibold text-ink-mute">
-                Load Shape Lab
-              </div>
-              <div className="text-[18px] font-bold tracking-tightish text-ink leading-tight">
-                {title}
-              </div>
-              {subtitle && (
-                <div className="text-[12px] text-ink-mute">{subtitle}</div>
-              )}
+            <div className="text-[20px] font-bold tracking-tightish leading-tight">
+              {title}
             </div>
+            {subtitle && (
+              <div className="text-[12px] text-white/60">{subtitle}</div>
+            )}
           </div>
           <button
             data-testid="reset-all-btn"
             type="button"
-            onClick={onResetAppliances}
+            onClick={onResetAll}
             disabled={!dirty}
-            className={`inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-[12px] font-medium ${
+            className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition ${
               !dirty
-                ? "text-ink-mute cursor-not-allowed"
-                : "text-ink hover:border-ink-mute bg-white"
+                ? "border-white/15 text-white/30 cursor-not-allowed"
+                : "border-white/30 text-white hover:bg-white/10"
             }`}
           >
             <RotateCcw size={12} strokeWidth={2.5} /> Reset appliances
@@ -199,8 +194,8 @@ export default function Dashboard() {
             {rankData && (
               <AppliancePanel
                 appliances={rankData.appliance_breakdown}
-                activeIds={activeAppliances}
-                onToggle={onToggleAppliance}
+                scales={scales}
+                onChange={onScaleChange}
               />
             )}
 
@@ -213,9 +208,9 @@ export default function Dashboard() {
             )}
 
             <footer className="pt-2 pb-8 text-[11px] text-ink-mute leading-relaxed">
-              Total load = sum of enabled appliance meters across selected sites.
+              Total load = sum of all appliance meters across selected sites.
+              Adjust each appliance's load with − / + (0% = removed, 200% = double).
               Retailer plans modeled on the AER CDR public Energy Product Reference Data API.
-              Demo · no auth.
             </footer>
           </div>
         </div>

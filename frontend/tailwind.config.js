@@ -10,17 +10,15 @@ module.exports = {
         line: "#e2e8f0",
         canvas: "#ffffff",
         surface: "#f8fafc",
-        accent: "#1e40af",
-        // Multi-color palette for the load-curve story
-        c_orig: "#1e40af",   // original demand
-        c_mod: "#ea580c",    // modelled demand
-        c_price: "#7c3aed",  // RRP overlay
-        band_peak: "#fecaca",
-        band_shoulder: "#fde68a",
-        band_off: "#bbf7d0",
-        feas_easy: "#16a34a",
-        feas_med: "#f59e0b",
-        feas_hard: "#dc2626",
+        // Termina palette
+        accent: "#4F46E5",        // indigo CTA
+        "accent-hover": "#4338CA",
+        forest: "#0F2A26",        // dark teal navbar
+        "forest-soft": "#1B3B36",
+        lime: "#C8E000",          // acid lime accent (best plan)
+        "lime-soft": "#EAF291",
+        mint: "#5EEAD4",          // aqua accent
+        cream: "#EDE9D5",         // secondary button cream
       },
       fontFamily: {
         sans: [

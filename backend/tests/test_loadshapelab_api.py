@@ -86,9 +86,9 @@ def test_spot(api):
 
 # ── Rank — new contract ────────────────────────────────────────────────────
 def test_rank_default_all_on(api):
-    """No active_appliances list (or empty) → all appliances on."""
+    """No appliance_scales (or empty) → all appliances at scale 1.0."""
     r = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": ["MTR-001"], "active_appliances": [],
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
     })
     assert r.status_code == 200
     j = r.json()
@@ -96,35 +96,49 @@ def test_rank_default_all_on(api):
     assert len(j["appliance_breakdown"]) == 8
     for a in j["appliance_breakdown"]:
         assert a["active"] is True
-    # Active shape should equal full shape when everything is on
+        assert a["scale"] == 1.0
     for i in range(48):
         assert abs(j["shape"]["active"][i] - j["shape"]["full"][i]) < 0.01
 
 
 def test_rank_requires_meter_ids(api):
-    r = api.post(f"{BASE_URL}/api/rank", json={"meter_ids": [], "active_appliances": []})
+    r = api.post(f"{BASE_URL}/api/rank", json={"meter_ids": [], "appliance_scales": {}})
     assert r.status_code == 422
 
 
 def test_rank_disable_appliance_reduces_cost(api):
-    """Disabling HVAC should reduce annual cost and peak kW."""
+    """Setting HVAC scale to 0 should reduce annual cost and peak kW."""
     full = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": ["MTR-001"], "active_appliances": [],
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
     }).json()
     no_hvac = api.post(f"{BASE_URL}/api/rank", json={
         "meter_ids": ["MTR-001"],
-        "active_appliances": ["fridges", "espresso", "ovens", "lighting",
-                              "dishwasher", "hot-water", "misc"],
+        "appliance_scales": {"hvac": 0.0},
     }).json()
     assert no_hvac["current"]["shifted_cost"] < full["current"]["shifted_cost"]
     assert no_hvac["stats"]["active"]["peak_kw"] < full["stats"]["active"]["peak_kw"]
     hvac_entry = next(a for a in no_hvac["appliance_breakdown"] if a["id"] == "hvac")
     assert hvac_entry["active"] is False
+    assert hvac_entry["scale"] == 0.0
+
+
+def test_rank_scale_doubles_load(api):
+    """Doubling HVAC scale should ~double its daily_kwh."""
+    base = api.post(f"{BASE_URL}/api/rank", json={
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
+    }).json()
+    double = api.post(f"{BASE_URL}/api/rank", json={
+        "meter_ids": ["MTR-001"], "appliance_scales": {"hvac": 2.0},
+    }).json()
+    base_hvac = next(a for a in base["appliance_breakdown"] if a["id"] == "hvac")
+    double_hvac = next(a for a in double["appliance_breakdown"] if a["id"] == "hvac")
+    assert abs(double_hvac["daily_kwh"] - 2.0 * base_hvac["daily_kwh"]) < 0.05
+    assert double_hvac["scale"] == 2.0
 
 
 def test_rank_appliance_breakdown_colors_unique(api):
     j = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": ["MTR-001"], "active_appliances": [],
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
     }).json()
     colors = [a["color"] for a in j["appliance_breakdown"]]
     assert len(set(colors)) == 8
@@ -133,21 +147,20 @@ def test_rank_appliance_breakdown_colors_unique(api):
 def test_rank_aggregate_all_sites(api):
     all_ids = [f"MTR-{i:03d}" for i in range(1, 11)]
     j = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": all_ids, "active_appliances": [],
+        "meter_ids": all_ids, "appliance_scales": {},
     }).json()
     assert j["n_sites"] == 10
-    # Each appliance daily_kwh should be ~10x the single-site value
     single = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": ["MTR-001"], "active_appliances": [],
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
     }).json()
     single_fridges = next(a for a in single["appliance_breakdown"] if a["id"] == "fridges")["daily_kwh"]
     multi_fridges = next(a for a in j["appliance_breakdown"] if a["id"] == "fridges")["daily_kwh"]
-    assert multi_fridges > 7 * single_fridges  # 10 sites, allowing for size variance
+    assert multi_fridges > 7 * single_fridges
 
 
 def test_rank_ranked_sorted(api):
     j = api.post(f"{BASE_URL}/api/rank", json={
-        "meter_ids": ["MTR-001"], "active_appliances": [],
+        "meter_ids": ["MTR-001"], "appliance_scales": {},
     }).json()
     costs = [p["shifted_cost"] for p in j["ranked"]]
     assert costs == sorted(costs)

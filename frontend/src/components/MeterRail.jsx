@@ -1,8 +1,7 @@
 import React from "react";
 import { fmtNumber } from "../lib/api";
-import { CheckSquare } from "lucide-react";
 
-function Sparkline({ values, color = "#1e40af" }) {
+function Sparkline({ values, color = "#4F46E5" }) {
   if (!values || !values.length) return null;
   const max = Math.max(...values);
   const min = Math.min(...values);
@@ -56,7 +55,7 @@ function MeterCard({ meter, selected, onSelect }) {
             {fmtNumber(meter.annual_kwh / 1000, 1)} MWh
           </div>
         </div>
-        <Sparkline values={meter.monthly_spend} color={selected ? "#1e40af" : "#64748b"} />
+        <Sparkline values={meter.monthly_spend} color={selected ? "#4F46E5" : "#64748b"} />
       </div>
       <div className="mt-1.5 text-[11px] text-ink-soft truncate">
         {meter.current_plan_label}
@@ -84,13 +83,12 @@ export default function MeterRail({ meters, selectedIds, onSelect, onSelectAll }
           data-testid="select-all-btn"
           type="button"
           onClick={onSelectAll}
-          className={`w-full inline-flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[11.5px] font-medium transition ${
+          className={`w-full rounded-md border px-2 py-1.5 text-[11.5px] font-medium transition ${
             allSelected
               ? "border-accent/40 bg-accent/10 text-accent"
               : "border-line bg-white text-ink-soft hover:border-ink-mute"
           }`}
         >
-          <CheckSquare size={12} strokeWidth={2.5} />
           {allSelected ? "All sites selected" : "Aggregate all sites"}
         </button>
       </div>

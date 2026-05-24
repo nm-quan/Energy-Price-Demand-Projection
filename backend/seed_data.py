@@ -350,13 +350,14 @@ def meter_baseline_shape(meter: Dict[str, Any]) -> List[float]:
     return [round(v, 4) for v in out]
 
 
-def meter_active_shape(meter: Dict[str, Any], active_appliances: List[str]) -> List[float]:
-    """Shape with only the active (toggled-on) appliances summed."""
+def meter_active_shape(meter: Dict[str, Any], appliance_scales: Dict[str, float]) -> List[float]:
+    """Shape with each appliance scaled by its multiplier (default 1.0)."""
     apps = meter_appliances(meter)
     out = [0.0] * 48
     for a in apps:
-        if a["id"] not in active_appliances:
+        scale = appliance_scales.get(a["id"], 1.0)
+        if scale <= 0:
             continue
         for i, v in enumerate(a["profile"]):
-            out[i] += v
+            out[i] += v * scale
     return [round(v, 4) for v in out]
