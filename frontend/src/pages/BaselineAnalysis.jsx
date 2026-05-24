@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ChevronRight, ArrowRight, AlertCircle, RotateCcw } from 'lucide-react';
 import { getBaseline, getClient, recalcBaseline, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
-import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import HourlyLineChart from '../components/HourlyLineChart';
+import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import AppliancePanel from '../components/AppliancePanel';
+import RetailerTable from '../components/RetailerTable';
 
 const COST_COLORS = {
   energy_peak: '#c44d3a',
@@ -16,12 +18,12 @@ const COST_COLORS = {
 };
 
 const COST_LABELS = {
-  energy_peak: 'Energy (Peak)',
-  energy_shoulder: 'Energy (Shoulder)',
-  energy_offpeak: 'Energy (Off-peak)',
-  demand_charge: 'Demand Charge',
+  energy_peak: 'Energy — Peak',
+  energy_shoulder: 'Energy — Shoulder',
+  energy_offpeak: 'Energy — Off-peak',
+  demand_charge: 'Demand charge',
   network: 'Network',
-  fixed_supply: 'Fixed Supply',
+  fixed_supply: 'Fixed supply',
   environmental: 'Environmental',
 };
 
@@ -47,14 +49,14 @@ function CostStackChart({ costStack }) {
   const maxVal = Math.max(...items.map((i) => i.value));
 
   return (
-    <div className="space-y-2.5" data-testid="cost-stack-chart">
+    <div className="space-y-2" data-testid="cost-stack-chart">
       {items.map((item) => {
         const pct = (item.value / total) * 100;
         const barPct = (item.value / maxVal) * 100;
         return (
           <div key={item.key} className="flex items-center gap-3">
-            <div className="w-28 text-right text-xs text-ink-soft flex-shrink-0">{COST_LABELS[item.key]}</div>
-            <div className="flex-1 bg-cream-200 rounded-full h-5 relative overflow-hidden">
+            <div className="w-32 text-right text-xs text-ink-soft flex-shrink-0">{COST_LABELS[item.key]}</div>
+            <div className="flex-1 bg-cream-200 rounded-full h-4 relative overflow-hidden">
               <div
                 className="h-full rounded-full transition-all"
                 style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.9 }}
@@ -63,15 +65,15 @@ function CostStackChart({ costStack }) {
             <div className="w-20 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">
               {fmtCurrency(item.value)}
             </div>
-            <div className="w-10 text-right text-xs text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
+            <div className="w-10 text-right text-[11px] text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
           </div>
         );
       })}
       <div className="flex items-center gap-3 border-t border-line pt-3 mt-2">
-        <div className="w-28 text-right text-xs font-semibold text-forest-900">Total annual</div>
+        <div className="w-32 text-right text-xs font-semibold text-forest-900">Total annual</div>
         <div className="flex-1" />
         <div className="w-20 text-right text-base font-bold text-violet tabnum flex-shrink-0">{fmtCurrency(total)}</div>
-        <div className="w-10 text-right text-xs text-ink-mute tabnum">100%</div>
+        <div className="w-10 text-right text-[11px] text-ink-mute tabnum">100%</div>
       </div>
     </div>
   );
@@ -122,7 +124,7 @@ export default function BaselineAnalysis() {
 
   useEffect(() => {
     if (!id) return;
-    const fetchAll = async () => {
+    (async () => {
       setLoading(true);
       setError('');
       try {
@@ -136,11 +138,9 @@ export default function BaselineAnalysis() {
       } finally {
         setLoading(false);
       }
-    };
-    fetchAll();
+    })();
   }, [id]);
 
-  // Debounced recalc whenever scales change (skip on first load)
   useEffect(() => {
     if (!initialBaseline.current) return;
     if (recalcTimer.current) clearTimeout(recalcTimer.current);
@@ -149,11 +149,8 @@ export default function BaselineAnalysis() {
       try {
         const res = await recalcBaseline(id, scales);
         setBaseline(res.data);
-      } catch (_) {
-        // ignore
-      } finally {
-        setRecalcing(false);
-      }
+      } catch (_) { /* ignore */ }
+      finally { setRecalcing(false); }
     }, 350);
     return () => recalcTimer.current && clearTimeout(recalcTimer.current);
   }, [scales, id]);
@@ -188,7 +185,8 @@ export default function BaselineAnalysis() {
 
   const metrics = baseline?.shape_metrics || {};
   const costStack = baseline?.cost_stack || {};
-  const applianceCurves = baseline?.appliance_curves || {};
+  const loadCurve = baseline?.load_curve || [];
+  const retailerComp = baseline?.retailer_comparison;
 
   const isModified = Object.values(scales).some((v) => Math.abs(v - 1) > 0.001);
 
@@ -197,22 +195,12 @@ export default function BaselineAnalysis() {
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.15em] text-ink-mute mb-3">
         <Link to="/clients" className="hover:text-forest-700">Clients</Link>
         <ChevronRight size={12} />
-        {client && <span className="text-forest-800 font-medium">{client.name}</span>}
-        <ChevronRight size={12} />
         <span className="text-violet font-medium">Baseline</span>
       </div>
 
       {client && (
         <div className="mb-8">
           <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
-          <div className="flex items-center gap-4 mt-3 text-sm text-ink-soft">
-            {client.address && <span>{client.address}</span>}
-            {client.nmi && (
-              <span className="font-mono text-[11px] bg-cream-100 px-2 py-0.5 rounded border border-line">
-                NMI · {client.nmi}
-              </span>
-            )}
-          </div>
         </div>
       )}
 
@@ -232,12 +220,13 @@ export default function BaselineAnalysis() {
 
       {!loading && baseline && (
         <>
+          {/* Row 1: Load shape + cost stack */}
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
             <div className="lg:col-span-3 space-y-4">
               <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6">
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between mb-3">
                   <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">
-                    Typical Weekday Load
+                    Hourly Load — Typical Weekday
                   </h2>
                   {recalcing && (
                     <span className="text-[11px] text-violet animate-pulse" data-testid="recalc-indicator">
@@ -245,25 +234,22 @@ export default function BaselineAnalysis() {
                     </span>
                   )}
                 </div>
-                <StackedAreaChart applianceCurves={applianceCurves} scales={{}} height={260} />
+                <HourlyLineChart series={loadCurve} height={240} />
                 <div className="mt-5 pt-5 border-t border-line">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-[11px] font-semibold text-forest-900 uppercase tracking-wider">
-                      Appliance Mix
+                      Appliance Tuning
                     </h3>
-                    <div className="flex items-center gap-3 text-[11px] text-ink-mute">
-                      <span>0–200% scale</span>
-                      {isModified && (
-                        <button
-                          type="button"
-                          onClick={resetScales}
-                          data-testid="reset-scales-btn"
-                          className="inline-flex items-center gap-1 text-violet hover:text-violet-700"
-                        >
-                          <RotateCcw size={11} /> reset
-                        </button>
-                      )}
-                    </div>
+                    {isModified && (
+                      <button
+                        type="button"
+                        onClick={resetScales}
+                        data-testid="reset-scales-btn"
+                        className="inline-flex items-center gap-1 text-[11px] text-violet hover:text-violet-700"
+                      >
+                        <RotateCcw size={11} /> reset
+                      </button>
+                    )}
                   </div>
                   <AppliancePanel
                     scales={scales}
@@ -290,10 +276,20 @@ export default function BaselineAnalysis() {
             </div>
           </div>
 
-          <div className="mt-10 flex items-center justify-between border-t border-line pt-6">
-            <p className="text-sm text-ink-soft">
-              Adjust the appliance sliders above — metrics and cost update live.
-            </p>
+          {/* Row 2: Retailer pricing */}
+          {retailerComp && (
+            <div className="mt-6 bg-cream-50 border border-line rounded-2xl shadow-card p-6" data-testid="baseline-retailer-section">
+              <div className="flex items-baseline justify-between mb-4">
+                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">
+                  Retailer Pricing — for this load shape
+                </h2>
+                <span className="text-[11px] text-ink-mute">5 AU plans · rates in c/kWh</span>
+              </div>
+              <RetailerTable data={retailerComp} />
+            </div>
+          )}
+
+          <div className="mt-8 flex justify-end">
             <button
               onClick={() => navigate(`/clients/${id}/scenarios`)}
               data-testid="build-scenarios-btn"

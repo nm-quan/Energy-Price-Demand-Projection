@@ -1,16 +1,14 @@
 """
-Claude-powered dynamic scenario generator.
+Scenario generator powered by Claude via the Emergent universal-key proxy.
 
-Each scenario is its own Claude conversation, run in parallel via a thread pool.
-This brings N=3 generation down from ~6 minutes to ~45 seconds.
+Uses the OpenAI SDK (the Emergent proxy is OpenAI-compatible) so we can swap
+between the user's key (Anthropic format) and the universal key with one base_url change.
 
-Tools (per scenario):
-  1. compare_retailers          — Run cost engine vs each of 5 retailers for a load curve.
-  2. simulate_appliance_change  — Apply a per-appliance change; return appliance + total curves + savings.
-  3. commit_scenario            — Echo a schema-conformant scenario payload back as confirmation.
-
-`analyze_load_profile` data is baked into the system message (no extra tool round-trip).
-Each scenario emits its own `memory_bullets`; we dedupe/cap to 6 across the batch.
+Each scenario is its own conversation, run in parallel via a thread pool.
+Tools available per scenario:
+  1. compare_retailers          — Cost engine vs 5 AU retailers for the SHIFTED load curve.
+  2. simulate_appliance_change  — Apply a per-appliance change; chained calls compose.
+  3. commit_scenario            — Final structured payload (curves filled in server-side).
 """
 from __future__ import annotations
 
@@ -20,110 +18,144 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-import anthropic
+from openai import OpenAI
 
 from models import Tariff
 from baseline_engine import compute_annual_cost_components, compute_shape_metrics
 
 logger = logging.getLogger("scenario_claude")
 
-MODEL_NAME = "claude-sonnet-4-5"
+MODEL_NAME = "claude-sonnet-4-5-20250929"
 MAX_TURNS = 12
 MAX_TOKENS = 2048
+EMERGENT_PROXY_URL = "https://integrations.emergentagent.com/llm"
 
 
 def _has_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_app_id() -> Optional[str]:
+    """Returns the X-App-ID required by the Emergent proxy to apply the correct budget."""
+    return os.environ.get("APP_URL") or os.environ.get("REACT_APP_BACKEND_URL")
+
+
+def _get_client() -> OpenAI:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
-    return anthropic.Anthropic(api_key=api_key)
+    headers: Dict[str, str] = {}
+    app_id = _get_app_id()
+    if app_id:
+        headers["X-App-ID"] = app_id
+    # Both Emergent universal keys (sk-emergent-…) and personal Anthropic keys (sk-ant-…)
+    # route through the proxy here. The proxy maps the OpenAI-format request to Anthropic's
+    # native Messages API behind the scenes.
+    return OpenAI(api_key=api_key, base_url=EMERGENT_PROXY_URL, default_headers=headers)
 
 
-# ── Tool schemas ────────────────────────────────────────────────────────────
+# ── Tool schemas (OpenAI function-calling format) ───────────────────────────
 
 TOOLS: List[Dict[str, Any]] = [
     {
-        "name": "compare_retailers",
-        "description": (
-            "Compare 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) against "
-            "the supplied SHIFTED load curve. Returns per-retailer annual cost and delta vs the "
-            "client's current tariff. Call ONCE per scenario after you have the final shifted curve."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "load_curve": {"type": "array", "items": {"type": "number"}},
-                "annual_kwh": {"type": "number"},
-            },
-            "required": ["load_curve", "annual_kwh"],
-        },
-    },
-    {
-        "name": "simulate_appliance_change",
-        "description": (
-            "Apply ONE operational change to ONE appliance. Returns before/after appliance "
-            "curves, the new total load curve, and savings vs baseline on the current tariff. "
-            "Chain multiple calls — state persists across calls within this scenario."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "appliance": {"type": "string"},
-                "action": {"type": "string", "enum": ["scale", "shift_window", "set_off"]},
-                "scale_factor": {"type": "number"},
-                "from_window": {"type": "array", "items": {"type": "integer"}},
-                "to_window": {"type": "array", "items": {"type": "integer"}},
-                "from_scale": {"type": "number"},
-            },
-            "required": ["appliance", "action"],
-        },
-    },
-    {
-        "name": "commit_scenario",
-        "description": "Return the final scenario summary. Call exactly ONCE. The server will fill in load curves from your simulate_appliance_change history.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "rationale": {"type": "string"},
-                "appliance_changes": {
-                    "type": "array",
-                    "description": "Brief summary of each change you made (no curves — server adds them).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "appliance": {"type": "string"},
-                            "action": {"type": "string"},
-                            "summary": {"type": "string"},
-                        },
-                        "required": ["appliance", "action", "summary"],
+        "type": "function",
+        "function": {
+            "name": "compare_retailers",
+            "description": (
+                "Compare 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) against "
+                "the supplied SHIFTED load curve. Returns per-retailer annual cost and delta vs the "
+                "client's current tariff. Call ONCE per scenario after the final shifted curve is set."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "load_curve": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "48 half-hourly kW values for the SHIFTED profile",
                     },
+                    "annual_kwh": {"type": "number"},
                 },
-                "retailer_winner": {"type": "string"},
-                "negotiation_levers": {"type": "array", "items": {"type": "string"}},
-                "memory_bullets": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "1–3 plain-English insights about the site (used in agent memory side panel)",
-                },
-                "savings_annual_low": {"type": "number"},
-                "savings_annual_high": {"type": "number"},
+                "required": ["load_curve", "annual_kwh"],
             },
-            "required": [
-                "name", "rationale", "appliance_changes",
-                "retailer_winner", "negotiation_levers", "memory_bullets",
-                "savings_annual_low", "savings_annual_high",
-            ],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simulate_appliance_change",
+            "description": (
+                "Apply ONE operational change to ONE appliance. Returns before/after appliance "
+                "curves, the new total load curve, and savings vs baseline on the current tariff. "
+                "Chain multiple calls — state persists across calls within this scenario."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appliance": {"type": "string"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["scale", "shift_window", "set_off"],
+                        "description": (
+                            "scale=multiply this appliance by scale_factor across all buckets; "
+                            "shift_window=move fraction of energy from from_window to to_window; "
+                            "set_off=turn appliance off (1-from_scale) during from_window"
+                        ),
+                    },
+                    "scale_factor": {"type": "number"},
+                    "from_window": {"type": "array", "items": {"type": "integer"}},
+                    "to_window": {"type": "array", "items": {"type": "integer"}},
+                    "from_scale": {"type": "number"},
+                },
+                "required": ["appliance", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit_scenario",
+            "description": "Return the final scenario summary. Call exactly ONCE. Curves are filled in server-side from your simulate_appliance_change history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "appliance_changes": {
+                        "type": "array",
+                        "description": "Brief summary of each change (no curves — server adds them).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "appliance": {"type": "string"},
+                                "action": {"type": "string"},
+                                "summary": {"type": "string"},
+                            },
+                            "required": ["appliance", "action", "summary"],
+                        },
+                    },
+                    "retailer_winner": {"type": "string"},
+                    "negotiation_levers": {"type": "array", "items": {"type": "string"}},
+                    "memory_bullets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "2-3 plain-English insights about THIS site (shown to the broker as quick context).",
+                    },
+                    "savings_annual_low": {"type": "number"},
+                    "savings_annual_high": {"type": "number"},
+                },
+                "required": [
+                    "name", "rationale", "appliance_changes",
+                    "retailer_winner", "negotiation_levers", "memory_bullets",
+                    "savings_annual_low", "savings_annual_high",
+                ],
+            },
         },
     },
 ]
 
 
-# ── Tool implementations ────────────────────────────────────────────────────
+# ── Tool implementations (server-side) ──────────────────────────────────────
 
 def _aggregate_appliance_curves(appliance_curves: Dict[str, List[float]]) -> List[float]:
     if not appliance_curves:
@@ -135,15 +167,15 @@ def _aggregate_appliance_curves(appliance_curves: Dict[str, List[float]]) -> Lis
     return total
 
 
-def _tool_compare_retailers(state: Dict[str, Any], load_curve: List[float], annual_kwh: float) -> Dict[str, Any]:
+def compute_retailer_comparison(load_curve: List[float], annual_kwh: float, current_tariff: Tariff) -> Dict[str, Any]:
+    """Pure helper — used by Claude AND by the /baseline endpoint (no AI needed)."""
     from data_store import RETAILER_TARIFFS
 
-    current = state["tariff"]
     if not load_curve or len(load_curve) != 48:
         return {"error": "load_curve must be 48 numbers"}
 
     rows = []
-    current_cost = compute_annual_cost_components(load_curve, current, annual_kwh)["grand_total"]
+    current_cost = compute_annual_cost_components(load_curve, current_tariff, annual_kwh)["grand_total"]
     for tdict in RETAILER_TARIFFS:
         t = Tariff(**tdict)
         cost = compute_annual_cost_components(load_curve, t, annual_kwh)["grand_total"]
@@ -153,16 +185,19 @@ def _tool_compare_retailers(state: Dict[str, Any], load_curve: List[float], annu
             "peak_rate": t.energy_rates.peak,
             "shoulder_rate": t.energy_rates.shoulder,
             "offpeak_rate": t.energy_rates.offpeak,
+            "supply_charge_daily": t.supply_charge,
             "annual_cost": round(cost, 2),
             "delta_vs_current": round(cost - current_cost, 2),
             "delta_pct": round((cost - current_cost) / current_cost * 100, 2) if current_cost > 0 else 0,
+            "is_current": t.retailer == current_tariff.retailer and t.plan_name == current_tariff.plan_name,
         })
     rows.sort(key=lambda r: r["annual_cost"])
     return {
-        "current_retailer": current.retailer,
+        "current_retailer": current_tariff.retailer,
         "current_annual_cost": round(current_cost, 2),
         "comparison": rows,
         "best": rows[0]["retailer"] if rows else None,
+        "max_saving_vs_current": round(current_cost - rows[0]["annual_cost"], 2) if rows else 0,
     }
 
 
@@ -208,7 +243,6 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
     appliance_curves[name] = after
     state["working_curves"] = appliance_curves
 
-    # Track simulation history so commit_scenario can later look up curves
     state.setdefault("sim_history", []).append({
         "appliance": name,
         "action": action,
@@ -246,18 +280,18 @@ PER_SCENARIO_SYSTEM = """You are an energy savings analyst. Generate ONE realist
 
 WORKFLOW:
 1. Call simulate_appliance_change one or more times to model the operational change.
-   - The working curves persist across calls within this scenario.
-   - Use scale, shift_window, or set_off actions on real appliances from the site.
+   The working curves persist across calls within this scenario.
+   Use scale, shift_window, or set_off actions on real appliances from the site.
 2. Call compare_retailers ONCE with the final shifted curve to find the best retailer.
-3. Call commit_scenario ONCE with the complete payload (name, rationale, appliance_changes, shifted_curve, retailer_winner, negotiation_levers, memory_bullets, savings_annual_low/high).
+3. Call commit_scenario ONCE with the complete payload. After it returns, output exactly: DONE
 
 CONSTRAINTS:
 - Be SPECIFIC to the site_type. A cafe is not an office.
 - Buckets are 0–47 half-hourly (0=midnight, 30=3pm peak start, 42=9pm peak end).
 - For TOU sites, focus on moving load OUT of 30–42 (3pm–9pm peak).
-- savings_annual_high should be ≥ savings_annual_low. Use the compare_retailers delta + the appliance simulation savings to estimate the range.
-- memory_bullets: 2–3 short insights about THIS site (not generic advice). Plain text.
-- After commit_scenario returns, output EXACTLY: DONE"""
+- savings_annual_high should be ≥ savings_annual_low. Use the compare_retailers delta plus the appliance simulation savings to estimate the range.
+- memory_bullets: 2–3 short insights about THIS site, plain text. Used as broker context, not generic advice.
+- Do not respond with markdown or commentary — only call tools."""
 
 
 def _build_user_message_one(
@@ -265,7 +299,6 @@ def _build_user_message_one(
     shape: Dict[str, Any],
     tariff: Tariff,
     annual_kwh: float,
-    load_curve: List[float],
     appliance_share: Dict[str, float],
     scenario_idx: int,
     total_count: int,
@@ -317,7 +350,7 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _generate_one(
-    cli: anthropic.Anthropic,
+    cli: OpenAI,
     client: Dict[str, Any],
     appliance_curves: Dict[str, List[float]],
     baseline_curve: List[float],
@@ -337,106 +370,104 @@ def _generate_one(
         "working_curves": {k: list(v) for k, v in appliance_curves.items()},
     }
     user_msg = _build_user_message_one(
-        client, shape, tariff, annual_kwh, baseline_curve, appliance_share,
+        client, shape, tariff, annual_kwh, appliance_share,
         scenario_idx, total_count, extra_instruction, avoid_themes,
     )
     messages: List[Dict[str, Any]] = [
-        {"role": "user", "content": [{"type": "text", "text": user_msg}]}
+        {"role": "system", "content": PER_SCENARIO_SYSTEM},
+        {"role": "user", "content": user_msg},
     ]
     committed: Optional[Dict[str, Any]] = None
+    last_retailer_table: Optional[Dict[str, Any]] = None
 
     for _turn in range(MAX_TURNS):
-        resp = cli.messages.create(
+        resp = cli.chat.completions.create(
             model=MODEL_NAME,
-            max_tokens=MAX_TOKENS,
-            system=PER_SCENARIO_SYSTEM,
-            tools=TOOLS,
             messages=messages,
+            tools=TOOLS,
+            max_tokens=MAX_TOKENS,
         )
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls = getattr(msg, "tool_calls", None) or []
 
-        assistant_blocks: List[Dict[str, Any]] = []
-        tool_use_blocks: List[Any] = []
-        for b in resp.content:
-            btype = getattr(b, "type", None)
-            if btype == "text":
-                assistant_blocks.append({"type": "text", "text": b.text})
-            elif btype == "tool_use":
-                assistant_blocks.append({
-                    "type": "tool_use",
-                    "id": b.id,
-                    "name": b.name,
-                    "input": b.input,
-                })
-                tool_use_blocks.append(b)
+        # Always append the assistant message
+        assistant_record: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+        if tool_calls:
+            assistant_record["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in tool_calls
+            ]
+        messages.append(assistant_record)
 
-        messages.append({"role": "assistant", "content": assistant_blocks})
-
-        if tool_use_blocks:
-            tool_results = []
-            for tu in tool_use_blocks:
+        if tool_calls:
+            for tc in tool_calls:
+                fname = tc.function.name
                 try:
-                    if tu.name == "compare_retailers":
-                        out = _tool_compare_retailers(
-                            state,
-                            tu.input.get("load_curve", []),
-                            float(tu.input.get("annual_kwh", annual_kwh)),
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                try:
+                    if fname == "compare_retailers":
+                        out = compute_retailer_comparison(
+                            args.get("load_curve", []),
+                            float(args.get("annual_kwh", annual_kwh)),
+                            tariff,
                         )
-                    elif tu.name == "simulate_appliance_change":
-                        out = _tool_simulate_appliance_change(state, tu.input or {})
-                    elif tu.name == "commit_scenario":
+                        if "comparison" in out:
+                            last_retailer_table = out
+                    elif fname == "simulate_appliance_change":
+                        out = _tool_simulate_appliance_change(state, args)
+                    elif fname == "commit_scenario":
+                        committed = args
                         out = {"committed": True}
-                        committed = tu.input or {}
                     else:
-                        out = {"error": f"unknown tool {tu.name}"}
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tu.id,
-                        "content": json.dumps(out),
-                    })
+                        out = {"error": f"unknown tool {fname}"}
                 except Exception as exc:  # noqa: BLE001
-                    logger.exception("tool %s failed", tu.name)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tu.id,
-                        "content": json.dumps({"error": str(exc)}),
-                        "is_error": True,
-                    })
-            messages.append({"role": "user", "content": tool_results})
-            # If we already committed, attach curves from sim history and return
+                    logger.exception("tool %s failed", fname)
+                    out = {"error": str(exc)}
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(out),
+                })
+
             if committed:
-                return _finalize_committed(committed, state)
+                return _finalize_committed(committed, state, last_retailer_table)
             continue
 
-        # end_turn — no tool calls this round
+        # No tool calls in this turn
         if committed:
-            return _finalize_committed(committed, state)
-        # Maybe Claude returned the payload inline as JSON
-        text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text")
-        parsed = _try_parse_json(text)
+            return _finalize_committed(committed, state, last_retailer_table)
+        # Maybe Claude returned JSON inline
+        parsed = _try_parse_json(msg.content or "")
         if parsed and parsed.get("appliance_changes"):
-            return _finalize_committed(parsed, state)
-        # Nudge Claude to actually use the tools
+            return _finalize_committed(parsed, state, last_retailer_table)
+        # Nudge it to use the tools
         messages.append({
             "role": "user",
-            "content": [{
-                "type": "text",
-                "text": (
-                    "Please proceed by calling simulate_appliance_change, then compare_retailers, "
-                    "and finally commit_scenario. Do not respond with plain text."
-                ),
-            }],
+            "content": "Please proceed by calling the tools (simulate_appliance_change → compare_retailers → commit_scenario). Do not respond in plain text.",
         })
         continue
 
-    logger.warning("scenario hit MAX_TURNS=%d without commit_scenario", MAX_TURNS)
-    return _finalize_committed(committed, state) if committed else None
+    logger.warning("scenario hit MAX_TURNS=%d without commit", MAX_TURNS)
+    return _finalize_committed(committed, state, last_retailer_table) if committed else None
 
 
-def _finalize_committed(committed: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach load curves to the committed payload using simulation history."""
+def _finalize_committed(
+    committed: Dict[str, Any],
+    state: Dict[str, Any],
+    retailer_table: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Attach load curves + retailer comparison to the committed payload."""
     sim_history: List[Dict[str, Any]] = state.get("sim_history", [])
-    # For each appliance_changes entry, find the FIRST matching sim_history record by appliance name.
-    # Multiple changes to the same appliance: pop them in order so each gets a unique record.
     history_by_app: Dict[str, List[Dict[str, Any]]] = {}
     for rec in sim_history:
         history_by_app.setdefault(rec["appliance"], []).append(rec)
@@ -452,10 +483,12 @@ def _finalize_committed(committed: Dict[str, Any], state: Dict[str, Any]) -> Dic
         enriched_changes.append(ch_copy)
     committed["appliance_changes"] = enriched_changes
 
-    # Always recompute shifted_curve from final working state
     working = state.get("working_curves") or {}
     shifted = _aggregate_appliance_curves(working)
     committed["shifted_curve"] = [round(v, 3) for v in shifted]
+
+    if retailer_table:
+        committed["retailer_comparison"] = retailer_table
     return committed
 
 
@@ -473,7 +506,6 @@ def generate_scenarios(
     baseline_curve = list(baseline.get("load_curve", []))
     shape = compute_shape_metrics(baseline_curve, annual_kwh)
 
-    # Pre-compute appliance share (no extra Claude tool call)
     total_kwh = sum(baseline_curve) * 0.5
     appliance_share: Dict[str, float] = {}
     for name, curve in appliance_curves.items():
@@ -482,7 +514,6 @@ def generate_scenarios(
     avoid_themes: List[str] = []
     scenarios: List[Dict[str, Any]] = []
 
-    # Generate in parallel (cap workers at 2 to stay under Anthropic 30k tokens/min rate limit)
     with ThreadPoolExecutor(max_workers=min(count, 2)) as pool:
         futures = {
             pool.submit(
@@ -506,12 +537,10 @@ def generate_scenarios(
     if not scenarios:
         raise RuntimeError("All scenario generations failed")
 
-    # Sort by savings_low desc, re-rank
     scenarios.sort(key=lambda s: s.get("savings_annual_low", 0), reverse=True)
     for i, s in enumerate(scenarios, start=1):
         s["rank"] = i
 
-    # Combine memory bullets: dedupe (case-insensitive prefix) and cap at 6
     seen = set()
     memory: List[str] = []
     for s in scenarios:

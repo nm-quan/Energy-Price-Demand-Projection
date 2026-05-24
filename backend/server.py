@@ -33,7 +33,7 @@ from interval_parser import (
     compute_interval_stats,
 )
 from baseline_engine import compute_baseline
-from scenario_claude import generate_scenarios, _has_api_key
+from scenario_claude import generate_scenarios, _has_api_key, compute_retailer_comparison
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -336,6 +336,7 @@ def get_baseline(client_id: str):
     load_curve, annual_kwh = _get_client_load_curve(client_id, client)
     result = compute_baseline(load_curve, tariff, annual_kwh)
     result["appliance_curves"] = _split_appliance_curves(load_curve, client.get("site_type", "office"))
+    result["retailer_comparison"] = compute_retailer_comparison(load_curve, annual_kwh, tariff)
     client["annual_cost"] = result["cost_stack"]["total_annual"]
     if not client.get("annual_kwh"):
         client["annual_kwh"] = annual_kwh
@@ -358,7 +359,6 @@ def recalc_baseline(client_id: str, body: BaselineRecalcRequest):
     load_curve, annual_kwh = _get_client_load_curve(client_id, client)
     appliance_curves = _split_appliance_curves(load_curve, client.get("site_type", "office"))
 
-    # Apply scales
     scales = body.scales or {}
     scaled_curves: Dict[str, List[float]] = {}
     for name, curve in appliance_curves.items():
@@ -371,13 +371,13 @@ def recalc_baseline(client_id: str, body: BaselineRecalcRequest):
             new_load[i] += v
     new_load = [round(v, 4) for v in new_load]
 
-    # Scale annual kWh proportionally
     base_sum = sum(load_curve)
     new_sum = sum(new_load)
     new_annual_kwh = annual_kwh * (new_sum / base_sum) if base_sum > 0 else annual_kwh
 
     result = compute_baseline(new_load, tariff, new_annual_kwh)
     result["appliance_curves"] = scaled_curves
+    result["retailer_comparison"] = compute_retailer_comparison(new_load, new_annual_kwh, tariff)
     return result
 
 

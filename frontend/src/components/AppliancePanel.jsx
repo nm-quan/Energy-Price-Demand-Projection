@@ -1,9 +1,13 @@
 import React from 'react';
 import { APPLIANCE_LAYERS } from './StackedAreaChart';
 
+/**
+ * Compact 4-column appliance grid (8 chips × 1 row on wide, 2 rows on narrow).
+ * No internal scrolling — fits within the parent. Sliders are full-width pills.
+ */
 export default function AppliancePanel({ scales, enabled, onScaleChange, onToggle }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2" data-testid="appliance-panel">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-2" data-testid="appliance-panel">
       {APPLIANCE_LAYERS.map(({ key, color }) => {
         const isOn = enabled[key];
         const scale = scales[key] ?? 1;
@@ -11,8 +15,8 @@ export default function AppliancePanel({ scales, enabled, onScaleChange, onToggl
           <div
             key={key}
             data-testid={`appliance-chip-${key}`}
-            className={`border rounded-xl p-3 transition-colors ${
-              isOn ? 'border-forest-200 bg-cream-50' : 'border-line bg-cream-200 opacity-50'
+            className={`border rounded-xl p-2.5 transition-colors ${
+              isOn ? 'border-forest-200 bg-cream-50' : 'border-line bg-cream-200 opacity-60'
             }`}
           >
             <button
@@ -21,9 +25,9 @@ export default function AppliancePanel({ scales, enabled, onScaleChange, onToggl
               data-testid={`appliance-toggle-${key}`}
               className="flex items-center gap-2 w-full text-left"
             >
-              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
-              <span className="text-xs font-semibold text-forest-900 truncate">{key}</span>
-              <span className="ml-auto text-[11px] text-ink-mute tabnum">
+              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+              <span className="text-[11px] font-semibold text-forest-900 truncate flex-1">{key}</span>
+              <span className="text-[10px] text-ink-mute tabnum">
                 {isOn ? `${Math.round(scale * 100)}%` : 'off'}
               </span>
             </button>
@@ -36,7 +40,7 @@ export default function AppliancePanel({ scales, enabled, onScaleChange, onToggl
               onChange={(e) => onScaleChange(key, parseInt(e.target.value, 10) / 100)}
               disabled={!isOn}
               data-testid={`appliance-slider-${key}`}
-              className="w-full mt-2 disabled:opacity-40"
+              className="w-full mt-1.5 disabled:opacity-40"
             />
           </div>
         );

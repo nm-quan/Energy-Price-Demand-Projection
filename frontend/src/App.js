@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams, Link } from 'react-router-dom';
-import { Zap, Users, BarChart3, Sparkles, FileText } from 'lucide-react';
 
 import ClientList from './pages/ClientList';
 import ClientSetup from './pages/ClientSetup';
@@ -12,39 +11,34 @@ function Sidebar({ clientId, clientName }) {
   const location = useLocation();
   const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
 
-  const NavItem = ({ to, icon: Icon, label, active, testId }) => (
+  const NavItem = ({ to, label, active, testId }) => (
     <Link
       to={to}
       data-testid={testId}
-      className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
+      className={`block px-3 py-2 rounded-lg text-sm transition-all ${
         active
-          ? 'bg-lime text-forest-900 font-semibold shadow-sm'
+          ? 'bg-lime text-forest-900 font-semibold'
           : 'text-forest-100/80 hover:bg-forest-700/40 hover:text-white'
       }`}
     >
-      <Icon size={15} strokeWidth={active ? 2.5 : 2} />
       {label}
     </Link>
   );
 
   return (
     <aside
-      className="w-64 bg-forest-800 text-white flex flex-col min-h-screen flex-shrink-0 border-r border-forest-900"
+      className="w-60 bg-forest-800 text-white flex flex-col min-h-screen flex-shrink-0 border-r border-forest-900"
       data-testid="app-sidebar"
     >
       <div className="px-6 pt-6 pb-5 border-b border-forest-700/50">
-        <Link to="/clients" className="flex items-center gap-2">
-          <div className="bg-lime rounded-md w-7 h-7 flex items-center justify-center">
-            <Zap size={15} className="text-forest-900" strokeWidth={2.5} />
-          </div>
-          <span className="font-display text-xl font-semibold tracking-tightest">EnergyScope</span>
+        <Link to="/clients" className="font-display text-2xl font-semibold tracking-tightest">
+          EnergyScope
         </Link>
       </div>
 
       <nav className="flex-1 px-3 py-5 space-y-1">
         <NavItem
           to="/clients"
-          icon={Users}
           label="Clients"
           active={isActive('/clients') && !clientId}
           testId="sidebar-nav-clients"
@@ -58,21 +52,18 @@ function Sidebar({ clientId, clientName }) {
             <div className="mt-1 space-y-1">
               <NavItem
                 to={`/clients/${clientId}/baseline`}
-                icon={BarChart3}
                 label="Baseline"
                 active={isActive(`/clients/${clientId}/baseline`)}
                 testId="sidebar-nav-baseline"
               />
               <NavItem
                 to={`/clients/${clientId}/scenarios`}
-                icon={Sparkles}
                 label="Scenarios"
                 active={isActive(`/clients/${clientId}/scenarios`)}
                 testId="sidebar-nav-scenarios"
               />
               <NavItem
                 to={`/clients/${clientId}/report`}
-                icon={FileText}
                 label="Reports"
                 active={isActive(`/clients/${clientId}/report`)}
                 testId="sidebar-nav-report"
@@ -83,7 +74,7 @@ function Sidebar({ clientId, clientName }) {
       </nav>
 
       <div className="px-6 py-4 border-t border-forest-700/50 text-[10px] text-forest-100/40 tracking-widest uppercase">
-        v2.0 · Termina
+        v2.0
       </div>
     </aside>
   );
