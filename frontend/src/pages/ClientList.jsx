@@ -1,35 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Plus, MapPin, Zap, CheckCircle, XCircle, AlertCircle, Sparkles } from 'lucide-react';
+import { Plus, MapPin, Zap, CheckCircle, XCircle, AlertCircle, ArrowRight } from 'lucide-react';
 import { getClients, fmtCurrency, fmtNumber } from '../lib/api';
-
-const DEMO_CLIENT_ID = 'client-demo-001';
 
 function StatusBadge({ status }) {
   const styles = {
-    draft: 'bg-slate-100 text-slate-600',
-    active: 'bg-forest-100 text-forest-800',
-    quoted: 'bg-lime-100 text-forest-900',
+    draft: 'bg-cream-300 text-ink-soft',
+    active: 'bg-lime/30 text-forest-900',
+    quoted: 'bg-violet-100 text-violet-700',
   };
   const cls = styles[status?.toLowerCase()] || styles.draft;
-  const label = status
-    ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()
-    : 'Draft';
+  const label = status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : 'Draft';
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider ${cls}`}>
       {label}
-    </span>
-  );
-}
-
-function DemoBadge() {
-  return (
-    <span
-      data-testid="demo-badge"
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-lime-400 text-forest-900"
-    >
-      <Sparkles size={11} />
-      DEMO
     </span>
   );
 }
@@ -37,11 +21,11 @@ function DemoBadge() {
 function DataChip({ present, label }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs ${
-        present ? 'bg-forest-100 text-forest-800' : 'bg-slate-100 text-slate-500'
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] ${
+        present ? 'bg-forest-50 text-forest-700 border border-forest-100' : 'bg-cream-200 text-ink-mute border border-line'
       }`}
     >
-      {present ? <CheckCircle size={11} /> : <XCircle size={11} />}
+      {present ? <CheckCircle size={10} /> : <XCircle size={10} />}
       {label}
     </span>
   );
@@ -49,14 +33,10 @@ function DataChip({ present, label }) {
 
 function SkeletonCard() {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 animate-pulse">
-      <div className="h-5 bg-slate-200 rounded w-2/3 mb-3" />
-      <div className="h-3 bg-slate-100 rounded w-full mb-2" />
-      <div className="h-3 bg-slate-100 rounded w-1/2 mb-4" />
-      <div className="flex gap-2">
-        <div className="h-5 bg-slate-100 rounded-full w-20" />
-        <div className="h-5 bg-slate-100 rounded-full w-20" />
-      </div>
+    <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6 animate-pulse">
+      <div className="h-5 bg-cream-300 rounded w-2/3 mb-3" />
+      <div className="h-3 bg-cream-200 rounded w-full mb-2" />
+      <div className="h-3 bg-cream-200 rounded w-1/2 mb-4" />
     </div>
   );
 }
@@ -75,11 +55,6 @@ export default function ClientList() {
   }, []);
 
   const handleCardClick = (client) => {
-    // Demo client goes straight to its baseline (it's fully set up)
-    if (client.id === DEMO_CLIENT_ID) {
-      navigate(`/clients/${client.id}/baseline`);
-      return;
-    }
     if (client.has_interval_data && client.has_tariff) {
       navigate(`/clients/${client.id}/baseline`);
     } else {
@@ -87,124 +62,112 @@ export default function ClientList() {
     }
   };
 
-  // Demo first, rest after
-  const sortedClients = [...clients].sort((a, b) => {
-    if (a.id === DEMO_CLIENT_ID) return -1;
-    if (b.id === DEMO_CLIENT_ID) return 1;
-    return 0;
-  });
-
   return (
-    <div className="p-8" data-testid="client-list-page">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-8">
+    <div className="p-10 max-w-6xl" data-testid="client-list-page">
+      <div className="flex items-end justify-between mb-10">
         <div>
-          <h1 className="text-2xl font-semibold text-forest-900">Clients</h1>
-          <p className="text-sm text-slate-600 mt-1">Manage your client sites and energy analyses</p>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-ink-mute mb-2">Energy broker workspace</p>
+          <h1 className="font-display text-5xl text-forest-900 leading-none">Your clients.</h1>
+          <p className="text-sm text-ink-soft mt-3 max-w-md">
+            Each card is a site. Pick one to see its load shape, run scenarios, and build savings reports.
+          </p>
         </div>
         <Link
           to="/clients/new"
           data-testid="new-client-btn"
-          className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-medium rounded-lg px-4 py-2.5 text-sm transition-colors"
+          className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-5 py-2.5 text-sm transition-all"
         >
-          <Plus size={16} />
+          <Plus size={16} strokeWidth={2.5} />
           New Client
         </Link>
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 mb-6 text-sm">
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 mb-6 text-sm">
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {loading && (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           {[1, 2, 3].map((i) => <SkeletonCard key={i} />)}
         </div>
       )}
 
       {!loading && !error && clients.length === 0 && (
-        <div className="text-center py-20">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-forest-100 rounded-2xl mb-4">
-            <Zap size={24} className="text-forest-700" />
+        <div className="text-center py-24 border-2 border-dashed border-line rounded-3xl bg-cream-50">
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-lime/30 rounded-2xl mb-4">
+            <Zap size={22} className="text-forest-800" />
           </div>
-          <h3 className="text-base font-medium text-forest-900 mb-1">No clients yet</h3>
-          <p className="text-sm text-slate-500 mb-6">Add your first client to get started.</p>
+          <h3 className="font-display text-2xl text-forest-900 mb-1">No clients yet.</h3>
+          <p className="text-sm text-ink-mute mb-6">Spin up your first one — it takes about 90 seconds.</p>
           <Link
             to="/clients/new"
-            className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-medium rounded-lg px-4 py-2.5 text-sm transition-colors"
+            data-testid="empty-state-new-client"
+            className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-5 py-2.5 text-sm transition-all"
           >
-            <Plus size={16} />
+            <Plus size={16} strokeWidth={2.5} />
             Add first client
           </Link>
         </div>
       )}
 
-      {!loading && sortedClients.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {sortedClients.map((client) => {
-            const isDemo = client.id === DEMO_CLIENT_ID;
-            return (
-              <button
-                key={client.id}
-                onClick={() => handleCardClick(client)}
-                data-testid={`client-card-${client.id}`}
-                className={`bg-white rounded-xl shadow-sm p-5 text-left transition-all group border ${
-                  isDemo
-                    ? 'border-lime-400 hover:border-lime-500 hover:shadow-lg ring-2 ring-lime-200/60'
-                    : 'border-slate-200 hover:border-forest-300 hover:shadow-md'
-                }`}
-              >
-                <div className="flex items-start justify-between mb-1 gap-2">
-                  <h3 className="font-semibold text-forest-900 group-hover:text-forest-700 transition-colors text-base leading-snug">
-                    {client.name}
-                  </h3>
-                  <div className="flex flex-col items-end gap-1">
-                    {isDemo && <DemoBadge />}
-                    <StatusBadge status={client.status} />
-                  </div>
+      {!loading && clients.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {clients.map((client) => (
+            <button
+              key={client.id}
+              onClick={() => handleCardClick(client)}
+              data-testid={`client-card-${client.id}`}
+              className="bg-cream-50 rounded-2xl shadow-card p-6 text-left transition-all group border border-line hover:border-forest-700 hover:-translate-y-0.5 hover:shadow-lg"
+            >
+              <div className="flex items-start justify-between mb-1 gap-2">
+                <h3 className="font-display text-xl text-forest-900 group-hover:text-violet leading-tight">
+                  {client.name}
+                </h3>
+                <StatusBadge status={client.status} />
+              </div>
+
+              {client.address && (
+                <p className="flex items-center gap-1.5 text-xs text-ink-mute mt-1">
+                  <MapPin size={11} />
+                  {client.address}
+                </p>
+              )}
+              {client.nmi && (
+                <p className="text-[11px] text-ink-mute mt-1 font-mono">NMI · {client.nmi}</p>
+              )}
+
+              <div className="flex flex-wrap gap-1.5 mt-4 mb-4">
+                <DataChip present={client.has_interval_data} label="Interval data" />
+                <DataChip present={client.has_tariff} label="Tariff" />
+              </div>
+
+              {(client.annual_kwh || client.annual_cost) && (
+                <div className="flex gap-6 pt-4 border-t border-line">
+                  {client.annual_kwh && (
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual</p>
+                      <p className="text-base font-semibold text-forest-900 tabnum">
+                        {fmtNumber(client.annual_kwh / 1000, 1)} <span className="text-xs font-normal text-ink-mute">MWh</span>
+                      </p>
+                    </div>
+                  )}
+                  {client.annual_cost && (
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-ink-mute">Cost</p>
+                      <p className="text-base font-semibold text-violet tabnum">{fmtCurrency(client.annual_cost)}</p>
+                    </div>
+                  )}
                 </div>
+              )}
 
-                {client.address && (
-                  <p className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                    <MapPin size={11} />
-                    {client.address}
-                  </p>
-                )}
-                {client.nmi && (
-                  <p className="text-xs text-slate-400 mb-3 font-mono">NMI: {client.nmi}</p>
-                )}
-
-                <div className="flex flex-wrap gap-1.5 mb-4">
-                  <DataChip present={client.has_interval_data} label="Interval data" />
-                  <DataChip present={client.has_tariff} label="Tariff" />
-                </div>
-
-                {(client.annual_kwh || client.annual_cost) && (
-                  <div className="flex gap-4 pt-3 border-t border-slate-100">
-                    {client.annual_kwh && (
-                      <div>
-                        <p className="text-xs text-slate-500">Annual kWh</p>
-                        <p className="text-sm font-semibold text-forest-900 tabnum">
-                          {fmtNumber(client.annual_kwh / 1000, 1)} MWh
-                        </p>
-                      </div>
-                    )}
-                    {client.annual_cost && (
-                      <div>
-                        <p className="text-xs text-slate-500">Annual Cost</p>
-                        <p className="text-sm font-semibold text-forest-800 tabnum">
-                          {fmtCurrency(client.annual_cost)}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </button>
-            );
-          })}
+              <div className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-forest-700 group-hover:text-violet transition-colors">
+                Open <ArrowRight size={12} className="group-hover:translate-x-1 transition-transform" />
+              </div>
+            </button>
+          ))}
         </div>
       )}
     </div>

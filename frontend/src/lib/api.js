@@ -4,13 +4,16 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 const api = axios.create({
   baseURL: BACKEND_URL,
-  timeout: 120000,
+  timeout: 180000,
 });
 
+// Clients
 export const getClients = () => api.get('/api/clients');
 export const createClient = (data) => api.post('/api/clients', data);
 export const getClient = (id) => api.get(`/api/clients/${id}`);
+export const deleteClient = (id) => api.delete(`/api/clients/${id}`);
 
+// Intervals
 export const uploadIntervalData = (id, file) => {
   const fd = new FormData();
   fd.append('file', file);
@@ -18,18 +21,30 @@ export const uploadIntervalData = (id, file) => {
 };
 export const getIntervalSummary = (id) => api.get(`/api/clients/${id}/intervals/summary`);
 
+// Tariffs
 export const getTariffs = () => api.get('/api/tariffs');
 export const createTariff = (data) => api.post('/api/tariffs', data);
 export const setClientTariff = (id, tariffId) => api.put(`/api/clients/${id}/tariff`, { tariff_id: tariffId });
 
+// Baseline
 export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
+export const recalcBaseline = (id, scales) => api.post(`/api/clients/${id}/baseline/recalc`, { scales });
 
-export const getScenarioLibrary = () => api.get('/api/scenarios/library');
-export const runScenarios = (id, scenarios) => api.post(`/api/clients/${id}/scenarios/run`, { scenarios });
-export const generateScenarios = (id, extraInstruction = null) =>
-  api.post(`/api/clients/${id}/scenarios/generate`, { extra_instruction: extraInstruction });
+// Scenarios
+export const generateScenarios = (id, count, extraInstruction = null) =>
+  api.post(`/api/clients/${id}/scenarios/generate`, {
+    count,
+    extra_instruction: extraInstruction,
+  });
+export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
+export const deleteScenario = (sid) => api.delete(`/api/scenarios/${sid}`);
+export const clearClientScenarios = (id) => api.delete(`/api/clients/${id}/scenarios`);
 
-export const getReport = (id) => api.get(`/api/clients/${id}/report`);
+// Reports
+export const createReport = (id, payload) => api.post(`/api/clients/${id}/reports`, payload);
+export const listReports = (id) => api.get(`/api/clients/${id}/reports`);
+export const getReport = (rid) => api.get(`/api/reports/${rid}`);
+export const deleteReport = (rid) => api.delete(`/api/reports/${rid}`);
 
 // Formatters
 export const fmtCurrency = (n) =>

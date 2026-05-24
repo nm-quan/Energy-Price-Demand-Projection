@@ -1,403 +1,509 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  ChevronRight,
-  Loader,
-  AlertCircle,
-  Sparkles,
-  ChevronDown,
-  ChevronUp,
-  RefreshCw,
-  Send,
-  FileText,
-  ArrowRight,
+  ChevronRight, Loader, AlertCircle, Sparkles, Send, Trash2, ArrowRight, FileText, Brain, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { getBaseline, getClient, generateScenarios, fmtCurrency, fmtNumber } from '../lib/api';
+import {
+  getClient, generateScenarios, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
+} from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 
-const DEMO_CLIENT_ID = 'client-demo-001';
+const HINT_PROMPTS = [
+  'Focus on HVAC pre-cooling',
+  'Include a battery option',
+  'Cheapest capex, fastest payback',
+  'Switch retailer + shift load',
+  'Aggressive load-shift to off-peak',
+  'Minimise demand charges',
+];
 
-function ScenarioCard({ scenario, expanded, onToggleExpand, applianceCurves, scales, baselineCurve }) {
-  const billing = scenario.savings?.billing_defensible || {};
-  const indicative = scenario.savings?.indicative || {};
-  const totalLow = scenario.savings?.total_low ?? 0;
-  const totalHigh = scenario.savings?.total_high ?? 0;
+// ── Appliance before/after bar chart (per appliance kWh comparison) ─────────
+function ApplianceChangeBars({ changes }) {
+  if (!changes || changes.length === 0) return null;
+  const rows = changes.map((c) => {
+    const beforeKwh = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterKwh = (c.after_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    return { ...c, beforeKwh, afterKwh, delta: afterKwh - beforeKwh };
+  });
+  const maxAbs = Math.max(...rows.map((r) => Math.max(r.beforeKwh, r.afterKwh)), 1);
+
+  return (
+    <div className="space-y-3" data-testid="appliance-change-bars">
+      {rows.map((r, i) => {
+        const layerColor = APPLIANCE_LAYERS.find((l) => l.key === r.appliance)?.color || '#5b4bff';
+        const beforeW = (r.beforeKwh / maxAbs) * 100;
+        const afterW = (r.afterKwh / maxAbs) * 100;
+        return (
+          <div key={i} className="bg-cream-50 border border-line rounded-xl p-3">
+            <div className="flex items-center justify-between text-xs mb-2">
+              <span className="font-semibold text-forest-900 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: layerColor }} />
+                {r.appliance}
+              </span>
+              <span className="text-ink-mute">{r.summary}</span>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] w-12 text-ink-mute uppercase">Before</span>
+                <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
+                  <div className="h-full rounded transition-all" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.5 }} />
+                </div>
+                <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right">
+                  {fmtNumber(r.beforeKwh, 0)} kWh
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] w-12 text-ink-mute uppercase">After</span>
+                <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
+                  <div className="h-full rounded transition-all" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
+                </div>
+                <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right">
+                  {fmtNumber(r.afterKwh, 0)} kWh
+                </span>
+              </div>
+              <div className="flex items-center gap-2 pl-14">
+                <span className={`text-[11px] tabnum font-medium ${r.delta < 0 ? 'text-forest-700' : 'text-amber-600'}`}>
+                  {r.delta < 0 ? '−' : '+'}{fmtNumber(Math.abs(r.delta), 0)} kWh/day · {r.delta < 0 ? 'reduced' : 'added'}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Retailer comparison table (negotiation lever) ───────────────────────────
+function RetailerNegotiation({ scenario }) {
+  const winner = scenario.retailer_winner;
+  const levers = scenario.negotiation_levers || [];
+
+  return (
+    <div className="bg-cream-50 border border-line rounded-xl p-4" data-testid="retailer-negotiation">
+      <div className="flex items-baseline justify-between mb-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900">Negotiation Playbook</h4>
+        {winner && (
+          <span className="text-xs text-ink-soft">
+            Recommended retailer: <span className="font-semibold text-violet">{winner}</span>
+          </span>
+        )}
+      </div>
+      {levers.length > 0 && (
+        <ul className="space-y-1.5 text-xs text-ink-soft">
+          {levers.map((lever, i) => (
+            <li key={i} className="flex items-start gap-2">
+              <span className="text-violet font-bold flex-shrink-0 mt-0.5">→</span>
+              <span>{lever}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ── Scenario card ──────────────────────────────────────────────────────────
+function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, onToggleExpand }) {
+  const totalLow = scenario.savings_annual_low ?? 0;
+  const totalHigh = scenario.savings_annual_high ?? 0;
 
   return (
     <div
-      data-testid={`scenario-card-${scenario.rank}`}
-      className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden hover:border-forest-300 transition-colors"
+      data-testid={`scenario-card-${scenario.id}`}
+      className={`bg-cream-50 border rounded-2xl shadow-card overflow-hidden transition-all ${
+        selected ? 'border-violet ring-2 ring-violet/30' : 'border-line hover:border-forest-300'
+      }`}
     >
       <div className="p-5">
         <div className="flex items-start gap-4">
-          <div
-            data-testid={`scenario-rank-${scenario.rank}`}
-            className="flex-shrink-0 w-12 h-12 rounded-xl bg-forest-900 text-lime-400 font-bold text-lg flex items-center justify-center"
+          <button
+            type="button"
+            onClick={onToggleSelect}
+            data-testid={`select-scenario-${scenario.id}`}
+            className={`flex-shrink-0 w-7 h-7 rounded-md border-2 flex items-center justify-center transition-colors ${
+              selected ? 'bg-violet border-violet text-white' : 'bg-cream-50 border-line hover:border-violet'
+            }`}
+            aria-label="Add to report"
           >
-            #{scenario.rank}
-          </div>
+            {selected && <Check size={15} strokeWidth={3} />}
+          </button>
 
           <div className="flex-1 min-w-0">
-            <h3 className="text-base font-semibold text-forest-900 leading-snug">
-              {scenario.name}
-            </h3>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[10px] uppercase tracking-wider text-ink-mute">#{scenario.rank}</span>
+            </div>
+            <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
             {scenario.rationale && (
-              <p className="text-sm text-slate-600 mt-1 leading-relaxed">{scenario.rationale}</p>
-            )}
-            {scenario.type && (
-              <span className="inline-block mt-2 px-2 py-0.5 bg-mint text-forest-800 border border-forest-100 rounded-full text-xs font-medium">
-                {scenario.type}
-              </span>
+              <p className="text-sm text-ink-soft mt-2 leading-relaxed">{scenario.rationale}</p>
             )}
           </div>
 
           <div className="text-right flex-shrink-0">
-            <p className="text-xs text-slate-500 mb-0.5">Annual saving</p>
-            <p className="text-lg font-bold text-forest-800 tabnum">
+            <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual saving</p>
+            <p className="text-lg font-display text-violet tabnum">
               {fmtCurrency(totalLow)}
-              <span className="text-sm font-normal text-slate-400 mx-1">–</span>
+              <span className="text-xs text-ink-mute mx-1">–</span>
               {fmtCurrency(totalHigh)}
             </p>
-            <button
-              type="button"
-              data-testid={`scenario-expand-${scenario.rank}`}
-              onClick={onToggleExpand}
-              className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-forest-700 hover:text-forest-900"
-            >
-              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              {expanded ? 'Hide details' : 'Show details'}
-            </button>
+            <div className="flex items-center gap-2 mt-2 justify-end">
+              <button
+                type="button"
+                onClick={onToggleExpand}
+                data-testid={`expand-scenario-${scenario.id}`}
+                className="text-[11px] inline-flex items-center gap-1 text-forest-700 hover:text-violet font-medium"
+              >
+                {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                {expanded ? 'Hide' : 'Details'}
+              </button>
+              <button
+                type="button"
+                onClick={onDelete}
+                data-testid={`delete-scenario-${scenario.id}`}
+                className="text-[11px] inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
       {expanded && (
-        <div className="px-5 pb-5 border-t border-slate-100 bg-mint/40">
-          <div className="pt-4">
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-forest-800 mb-2">
-              Shifted load shape
+        <div className="border-t border-line bg-cream-100/50 px-5 py-5 space-y-5">
+          {/* Hourly load curve overlay */}
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-2">
+              Hourly Load — Before vs After
             </h4>
             <StackedAreaChart
-              applianceCurves={applianceCurves}
-              scales={scales}
+              applianceCurves={scenario.baseline_appliance_curves || {}}
+              scales={{}}
               height={200}
-              baseline={baselineCurve}
+              baseline={scenario.baseline_curve}
               overlay={scenario.shifted_curve}
+              testId={`scenario-chart-${scenario.id}`}
             />
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
-            <div className="bg-white rounded-lg p-3 border border-slate-200">
-              <p className="text-xs text-slate-500">Energy saving</p>
-              <p className="text-sm font-bold text-forest-800 tabnum">{fmtCurrency(billing.energy ?? 0)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-slate-200">
-              <p className="text-xs text-slate-500">Demand saving</p>
-              <p className="text-sm font-bold text-forest-800 tabnum">{fmtCurrency(billing.demand ?? 0)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-slate-200">
-              <p className="text-xs text-slate-500">Billing-defensible</p>
-              <p className="text-sm font-bold text-forest-900 tabnum">{fmtCurrency(billing.total ?? 0)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-slate-200">
-              <p className="text-xs text-slate-500">Indicative contract</p>
-              <p className="text-sm font-bold text-forest-700 tabnum">
-                {fmtCurrency(indicative.contract_low ?? 0)}–{fmtCurrency(indicative.contract_high ?? 0)}
-              </p>
+            <div className="flex items-center gap-4 mt-2 text-[11px] text-ink-mute">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-8 border-t-2 border-dashed border-forest-700" />
+                Baseline
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-8 border-t-2 border-violet" />
+                Optimised
+              </span>
             </div>
           </div>
 
-          {scenario.parameters && Object.keys(scenario.parameters).length > 0 && (
-            <details className="mt-4 text-xs">
-              <summary className="text-forest-700 font-medium cursor-pointer">Parameters</summary>
-              <pre className="mt-2 bg-white border border-slate-200 rounded-lg p-3 overflow-x-auto text-slate-700">
-                {JSON.stringify(scenario.parameters, null, 2)}
-              </pre>
-            </details>
+          {/* Appliance changes */}
+          {scenario.appliance_changes && scenario.appliance_changes.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+                Appliance Changes
+              </h4>
+              <ApplianceChangeBars changes={scenario.appliance_changes} />
+            </div>
           )}
+
+          {/* Retailer negotiation */}
+          <RetailerNegotiation scenario={scenario} />
         </div>
       )}
     </div>
   );
 }
 
+// ── Agent Memory side panel ─────────────────────────────────────────────────
+function AgentMemoryPanel({ memory }) {
+  if (!memory || memory.length === 0) {
+    return (
+      <div className="memo-card p-4" data-testid="agent-memory-empty">
+        <p className="flex items-center gap-2 text-forest-700 mb-2 font-sans font-semibold text-sm">
+          <Brain size={14} /> Agent Memory
+        </p>
+        <p className="text-ink-mute font-sans text-xs">
+          Generate scenarios to see what the agent learned about this site.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="memo-card p-4" data-testid="agent-memory-panel">
+      <p className="flex items-center gap-2 text-forest-800 mb-3 font-sans font-semibold text-sm">
+        <Brain size={14} className="text-violet" /> Agent Memory
+      </p>
+      <ul className="space-y-2">
+        {memory.map((bullet, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <span className="text-violet flex-shrink-0">·</span>
+            <span>{bullet}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ── Main page ──────────────────────────────────────────────────────────────
 export default function ScenarioBuilder() {
   const { id } = useParams();
   const navigate = useNavigate();
 
   const [client, setClient] = useState(null);
-  const [baseline, setBaseline] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const [generating, setGenerating] = useState(false);
-  const [genError, setGenError] = useState('');
-  const [scenarios, setScenarios] = useState(null);
-  const [source, setSource] = useState(null);
-  const [expanded, setExpanded] = useState(null);
+  const [scenarios, setScenarios] = useState([]);
+  const [agentMemory, setAgentMemory] = useState([]);
+  const [count, setCount] = useState(3);
   const [extraInstruction, setExtraInstruction] = useState('');
-  const autoTriggered = useRef(false);
-
-  const isDemo = id === DEMO_CLIENT_ID;
-
-  // baseline appliance scales (all on, 100%) for chart context
-  const defaultScales = Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, 1]));
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [expandedId, setExpandedId] = useState(null);
+  const [creatingReport, setCreatingReport] = useState(false);
 
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
+    const fetch = async () => {
       try {
-        const [clientRes, baselineRes] = await Promise.all([getClient(id), getBaseline(id)]);
+        const [clientRes, scenariosRes] = await Promise.all([getClient(id), listScenarios(id)]);
         setClient(clientRes.data);
         sessionStorage.setItem(`client_name_${id}`, clientRes.data.name);
-        setBaseline(baselineRes.data);
+        const list = scenariosRes.data || [];
+        setScenarios(list);
+        if (list.length > 0) {
+          // Use the most recent batch's agent_memory
+          setAgentMemory(list[0].agent_memory || []);
+        }
       } catch (err) {
-        setError(err.response?.data?.detail || 'Failed to load scenario data.');
-      } finally {
-        setLoading(false);
+        setError(err.response?.data?.detail || 'Failed to load page.');
       }
     };
-    fetchData();
+    fetch();
   }, [id]);
 
-  const runGenerate = async (instruction = null) => {
+  const runGenerate = async () => {
     setGenerating(true);
-    setGenError('');
+    setError('');
     try {
-      const res = await generateScenarios(id, instruction);
-      setScenarios(res.data.scenarios || []);
-      setSource(res.headers['x-scenario-source'] || res.data.source || 'claude');
-      if ((res.data.scenarios || []).length > 0) {
-        setExpanded(1);
-      }
-      // Cache on sessionStorage so demo doesn't keep regenerating
-      try {
-        sessionStorage.setItem(
-          `scenarios_${id}`,
-          JSON.stringify({
-            scenarios: res.data.scenarios,
-            source: res.headers['x-scenario-source'] || res.data.source || 'claude',
-            baseline_curve: res.data.baseline_curve,
-          })
-        );
-      } catch (_) {}
+      const res = await generateScenarios(id, count, extraInstruction.trim() || null);
+      const newScenarios = res.data.scenarios || [];
+      // Merge with existing — newest first
+      setScenarios((cur) => [...newScenarios, ...cur]);
+      setAgentMemory(res.data.agent_memory || []);
+      if (newScenarios[0]) setExpandedId(newScenarios[0].id);
+      setExtraInstruction('');
     } catch (err) {
-      setGenError(err.response?.data?.detail || 'Scenario generation failed. Please try again.');
+      setError(err.response?.data?.detail || 'Scenario generation failed. Try again.');
     } finally {
       setGenerating(false);
     }
   };
 
-  // Demo: auto-trigger generation on first load (sessionStorage-cached)
-  useEffect(() => {
-    if (!isDemo || loading || baseline == null || autoTriggered.current) return;
-    autoTriggered.current = true;
-    try {
-      const cached = sessionStorage.getItem(`scenarios_${id}`);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (parsed?.scenarios?.length) {
-          setScenarios(parsed.scenarios);
-          setSource(parsed.source);
-          setExpanded(1);
-          return;
-        }
-      }
-    } catch (_) {}
-    runGenerate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDemo, loading, baseline, id]);
+  const handleDelete = async (sid) => {
+    await deleteScenario(sid);
+    setScenarios((cur) => cur.filter((s) => s.id !== sid));
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      next.delete(sid);
+      return next;
+    });
+  };
 
-  const handleFollowUp = (e) => {
-    e.preventDefault();
-    if (!extraInstruction.trim()) return;
-    runGenerate(extraInstruction.trim());
-    setExtraInstruction('');
+  const handleClearAll = async () => {
+    if (!window.confirm('Delete all scenarios for this client?')) return;
+    await clearClientScenarios(id);
+    setScenarios([]);
+    setSelectedIds(new Set());
+    setAgentMemory([]);
+  };
+
+  const toggleSelect = (sid) => {
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(sid)) next.delete(sid); else next.add(sid);
+      return next;
+    });
+  };
+
+  const handleCreateReport = async () => {
+    if (selectedIds.size === 0) {
+      setError('Select at least one scenario to add to a report.');
+      return;
+    }
+    setCreatingReport(true);
+    try {
+      const res = await createReport(id, {
+        scenario_ids: Array.from(selectedIds),
+        title: `${client?.name || 'Site'} — Energy Report`,
+      });
+      navigate(`/clients/${id}/report?focus=${res.data.id}`);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to create report.');
+    } finally {
+      setCreatingReport(false);
+    }
   };
 
   return (
-    <div className="p-8" data-testid="scenarios-page">
-      <div className="flex items-center gap-2 text-sm text-slate-500 mb-2">
-        <Link to="/clients" className="hover:text-forest-700 transition-colors">Clients</Link>
-        <ChevronRight size={14} />
+    <div className="p-10 max-w-7xl" data-testid="scenarios-page">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.15em] text-ink-mute mb-3">
+        <Link to="/clients" className="hover:text-forest-700">Clients</Link>
+        <ChevronRight size={12} />
         {client && (
-          <>
-            <Link to={`/clients/${id}/baseline`} className="text-slate-700 hover:text-forest-700 font-medium transition-colors">
-              {client.name}
-            </Link>
-            <ChevronRight size={14} />
-          </>
+          <Link to={`/clients/${id}/baseline`} className="hover:text-forest-700 text-forest-800 font-medium">
+            {client.name}
+          </Link>
         )}
-        <span className="text-forest-900 font-medium">Scenarios</span>
+        <ChevronRight size={12} />
+        <span className="text-violet font-medium">Scenarios</span>
       </div>
 
-      <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
+      <div className="flex items-end justify-between mb-8 gap-6">
         <div>
-          <h1 className="text-2xl font-semibold text-forest-900">Load-Shift Scenarios</h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Claude analyses this site's load shape and ranks bespoke savings opportunities.
+          <h1 className="font-display text-5xl text-forest-900 leading-none">Load-shift scenarios.</h1>
+          <p className="text-sm text-ink-soft mt-3 max-w-xl">
+            Claude analyses the site, simulates appliance-level changes, compares retailers, and saves each scenario to your database.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {scenarios && (
-            <button
-              type="button"
-              onClick={() => runGenerate()}
-              disabled={generating}
-              data-testid="regenerate-btn"
-              className="inline-flex items-center gap-2 border border-forest-200 hover:border-forest-400 text-forest-800 font-medium rounded-lg px-3 py-2 text-sm transition-colors disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={generating ? 'animate-spin' : ''} />
-              Regenerate
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => runGenerate()}
-            disabled={generating || loading}
-            data-testid="generate-scenarios-btn"
-            className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 disabled:bg-slate-300 disabled:text-slate-500 text-forest-900 font-semibold rounded-lg px-4 py-2.5 text-sm transition-colors"
-          >
-            <Sparkles size={15} />
-            {scenarios ? 'Generate again' : 'Generate Scenarios'}
-          </button>
-        </div>
       </div>
 
-      {error && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm mb-6">
-          <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <Loader size={24} className="animate-spin text-forest-700" />
-        </div>
-      ) : (
-        <>
-          {/* Loading state */}
-          {generating && (
-            <div
-              data-testid="claude-loading"
-              className="bg-white border border-forest-200 rounded-xl p-8 flex items-center gap-4 mb-6"
-            >
-              <div className="flex-shrink-0 w-12 h-12 rounded-xl bg-forest-900 text-lime-400 flex items-center justify-center">
-                <Sparkles size={20} className="animate-pulse" />
+      <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
+        {/* Main column */}
+        <div className="lg:col-span-5 space-y-5">
+          {/* Generator card */}
+          <div className="bg-forest-800 text-white rounded-2xl p-6 shadow-card">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="bg-lime rounded-md w-8 h-8 flex items-center justify-center">
+                <Sparkles size={16} className="text-forest-900" strokeWidth={2.5} />
               </div>
               <div>
-                <p className="text-forest-900 font-semibold">Claude is analysing your load data…</p>
-                <p className="text-sm text-slate-500 mt-0.5">
-                  Running scenario math, ranking by savings.
-                </p>
-              </div>
-              <div className="ml-auto">
-                <Loader size={20} className="animate-spin text-forest-700" />
+                <h2 className="font-display text-xl">Generate scenarios</h2>
+                <p className="text-xs text-forest-100/60">Pick how many. Add an optional focus. Claude does the rest.</p>
               </div>
             </div>
-          )}
 
-          {genError && (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm mb-6">
+            <div className="flex items-center gap-3 flex-wrap mb-4">
+              <label className="text-[11px] uppercase tracking-wider text-forest-100/70">Count</label>
+              <input
+                type="number"
+                min={1} max={10}
+                value={count}
+                onChange={(e) => setCount(Math.max(1, Math.min(10, parseInt(e.target.value || '1', 10))))}
+                data-testid="scenario-count-input"
+                className="w-16 bg-forest-700 border border-forest-600 rounded-lg px-3 py-1.5 text-sm tabnum focus:outline-none focus:border-lime"
+              />
+              <input
+                type="text"
+                value={extraInstruction}
+                onChange={(e) => setExtraInstruction(e.target.value)}
+                placeholder="Optional focus (e.g. battery only, no capex over $20k)…"
+                data-testid="extra-instruction-input"
+                className="flex-1 min-w-[200px] bg-forest-700 border border-forest-600 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-lime placeholder:text-forest-100/30"
+              />
+              <button
+                type="button"
+                onClick={runGenerate}
+                disabled={generating}
+                data-testid="generate-scenarios-btn"
+                className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-5 py-2 text-sm transition-all disabled:opacity-50"
+              >
+                {generating ? <Loader size={14} className="animate-spin" /> : <Sparkles size={14} strokeWidth={2.5} />}
+                {generating ? 'Generating…' : 'Generate'}
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {HINT_PROMPTS.map((hint) => (
+                <button
+                  key={hint}
+                  type="button"
+                  onClick={() => setExtraInstruction(hint)}
+                  data-testid={`hint-${hint.toLowerCase().replace(/\W+/g, '-')}`}
+                  className="hint-bubble"
+                  style={{ background: 'rgba(255,255,255,0.06)', borderColor: 'rgba(196,233,74,0.3)', color: '#dde7c8' }}
+                >
+                  <Sparkles size={11} /> {hint}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
               <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
-              <span>{genError}</span>
+              <span>{error}</span>
             </div>
           )}
 
-          {source === 'fallback' && scenarios && (
-            <div className="mb-4 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2" data-testid="fallback-notice">
-              Showing fallback scenarios (Claude API unavailable).
-            </div>
-          )}
-
-          {/* Empty state */}
-          {!scenarios && !generating && (
-            <div className="bg-white border border-dashed border-forest-300 rounded-xl p-12 text-center">
-              <div className="inline-flex items-center justify-center w-14 h-14 bg-mint rounded-2xl mb-4">
-                <Sparkles size={24} className="text-forest-700" />
+          {/* Scenario list */}
+          {scenarios.length === 0 && !generating && (
+            <div className="border-2 border-dashed border-line rounded-2xl bg-cream-50 p-12 text-center">
+              <div className="inline-flex items-center justify-center w-12 h-12 bg-lime/40 rounded-xl mb-4">
+                <Sparkles size={20} className="text-forest-800" />
               </div>
-              <h3 className="text-base font-medium text-forest-900 mb-1">
-                Generate bespoke scenarios
-              </h3>
-              <p className="text-sm text-slate-500 mb-6">
-                Claude will analyse this site's profile and rank load-shift opportunities by savings.
+              <h3 className="font-display text-xl text-forest-900 mb-1">No scenarios yet.</h3>
+              <p className="text-sm text-ink-mute">Set a count above and click <span className="font-semibold">Generate</span>.</p>
+            </div>
+          )}
+
+          {scenarios.length > 0 && (
+            <div className="flex items-center justify-between text-xs text-ink-mute pt-2">
+              <p>
+                <span className="font-semibold text-forest-800">{scenarios.length}</span> scenario{scenarios.length === 1 ? '' : 's'} ·
+                <span className="font-semibold text-violet ml-1">{selectedIds.size}</span> selected
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleClearAll}
+                  data-testid="clear-scenarios-btn"
+                  className="text-xs inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
+                >
+                  <Trash2 size={12} /> Clear all
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-3" data-testid="scenarios-list">
+            {scenarios.map((s) => (
+              <ScenarioCard
+                key={s.id}
+                scenario={s}
+                selected={selectedIds.has(s.id)}
+                onToggleSelect={() => toggleSelect(s.id)}
+                onDelete={() => handleDelete(s.id)}
+                expanded={expandedId === s.id}
+                onToggleExpand={() => setExpandedId((cur) => (cur === s.id ? null : s.id))}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Side rail */}
+        <aside className="lg:col-span-2 space-y-4">
+          <AgentMemoryPanel memory={agentMemory} />
+
+          {scenarios.length > 0 && (
+            <div className="bg-violet/10 border border-violet/30 rounded-2xl p-4">
+              <h3 className="font-display text-lg text-forest-900 mb-1">Bundle into a report</h3>
+              <p className="text-xs text-ink-soft mb-3">
+                Tick scenarios on the left, then create a saved report. PDF export from there.
               </p>
               <button
                 type="button"
-                onClick={() => runGenerate()}
-                className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-semibold rounded-lg px-4 py-2.5 text-sm transition-colors"
+                onClick={handleCreateReport}
+                disabled={selectedIds.size === 0 || creatingReport}
+                data-testid="create-report-btn"
+                className="btn-violet w-full inline-flex items-center justify-center gap-2 font-semibold rounded-full px-4 py-2.5 text-sm transition-all disabled:opacity-50"
               >
-                <Sparkles size={15} />
-                Generate Scenarios
+                {creatingReport ? <Loader size={14} className="animate-spin" /> : <FileText size={14} />}
+                Create report ({selectedIds.size})
+                {!creatingReport && <ArrowRight size={14} />}
               </button>
             </div>
           )}
-
-          {/* Ranked scenarios */}
-          {scenarios && scenarios.length > 0 && (
-            <div className="space-y-4" data-testid="ranked-scenarios">
-              {scenarios.map((s) => (
-                <ScenarioCard
-                  key={s.rank}
-                  scenario={s}
-                  expanded={expanded === s.rank}
-                  onToggleExpand={() => setExpanded((cur) => (cur === s.rank ? null : s.rank))}
-                  applianceCurves={baseline?.appliance_curves}
-                  scales={defaultScales}
-                  baselineCurve={baseline?.load_curve}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Follow-up prompt */}
-          {scenarios && scenarios.length > 0 && (
-            <form
-              onSubmit={handleFollowUp}
-              data-testid="followup-form"
-              className="mt-6 bg-white border border-slate-200 rounded-xl p-4 shadow-sm"
-            >
-              <label className="text-xs font-semibold uppercase tracking-wide text-forest-800 mb-2 block">
-                Ask Claude for a different angle
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={extraInstruction}
-                  onChange={(e) => setExtraInstruction(e.target.value)}
-                  placeholder="e.g. What if we added solar? Show me battery options under $30k capex"
-                  data-testid="followup-input"
-                  className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest-500 focus:border-transparent"
-                />
-                <button
-                  type="submit"
-                  disabled={!extraInstruction.trim() || generating}
-                  data-testid="followup-submit"
-                  className="inline-flex items-center gap-2 bg-forest-900 hover:bg-forest-800 disabled:bg-slate-300 text-lime-400 disabled:text-slate-500 font-medium rounded-lg px-4 py-2 text-sm transition-colors"
-                >
-                  <Send size={14} />
-                  Ask
-                </button>
-              </div>
-            </form>
-          )}
-
-          {scenarios && scenarios.length > 0 && (
-            <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => navigate(`/clients/${id}/report`)}
-                data-testid="generate-report-btn"
-                className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-semibold rounded-lg px-6 py-2.5 text-sm transition-colors"
-              >
-                <FileText size={15} />
-                Generate Report
-                <ArrowRight size={15} />
-              </button>
-            </div>
-          )}
-        </>
-      )}
+        </aside>
+      </div>
     </div>
   );
 }

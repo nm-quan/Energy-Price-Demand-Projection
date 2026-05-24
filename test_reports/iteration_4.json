@@ -1,0 +1,67 @@
+{
+  "summary": "Backend tested for EnergyScope v2 rewrite. 14/14 fast pytest cases pass against external URL. 4 Claude-dependent tests errored on the external URL due to Kubernetes ingress timeout (~60s) — Claude scenario generation actually takes ~250s for count=2. Validated those flows directly against localhost:8001: all pass — scenarios returned with full rich schema, persisted to disk, list/delete/report-create/get/delete/cascade all functional.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/clients/{id}/scenarios/generate",
+        "issue": "Returns 502 'preview environment is not responding' via the public ingress URL because Claude generation for count=2 takes ~245s (well beyond the ingress/proxy timeout). The frontend will NEVER receive a 200 for count>=2 through the public URL. Additionally, the request actually completes server-side ~3 minutes later and persists scenarios — but the client has already given up. Verified: same call against http://localhost:8001 succeeds in 246s with 2 fully-formed scenarios.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/clients/{id}/scenarios/generate (background completion)",
+        "issue": "When the gateway returns 502, Claude keeps running and eventually persists scenarios. If the user deletes the client in the meantime (or the fixture teardown does), the scenarios become orphans pointing to a non-existent client_id. Found 2 such orphan scenarios in data_store.json after the failed test run (now cleaned up). Suggest either (a) speeding generation (parallelize per-scenario calls, lower MAX_TURNS, smaller MAX_TOKENS) or (b) making generation async/background with a job-id polling endpoint, or (c) checking client still exists before final persist."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_energy_broker_v2.py",
+    "/app/test_reports/pytest/iter4_results.xml"
+  ],
+  "action_items": [
+    "URGENT: Make scenario generation finish in <60s or switch to async job pattern. Options: lower MAX_TURNS from 16, reduce count to 1, parallelize scenarios, use streaming, or expose POST /scenarios/generate that returns 202 + job_id + GET /scenarios/jobs/{id} polling. Without this, the production UI cannot generate any scenarios through the ingress.",
+    "Guard the final commit in generate_client_scenarios — if client_id was deleted while Claude was running, skip persistence (avoid orphans).",
+    "Consider returning per-scenario incrementally (stream/SSE) so users see progress instead of waiting 4+ minutes."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 542 lines — still manageable but synthetic profiles + appliance weights should move to a separate data module.",
+    "Cascade delete logic in DELETE /api/clients/{id} is correct, but mutates dicts while iterating via list comprehension first — fine — however no transaction guarantee since save_to_disk is called once at end (acceptable for JSON store).",
+    "POST /api/clients/{id}/scenarios/generate is fully synchronous — at ~250s per call it WILL hit any reverse-proxy timeout. Needs background-task pattern (FastAPI BackgroundTasks + polling, or an async job queue).",
+    "_resolve_tariff silently falls back to the first tariff in the store if the client has none assigned — this could surprise users. Better: raise 400 'client has no tariff assigned' to force explicit selection.",
+    "scenario_claude MODEL_NAME hardcoded as claude-sonnet-4-5 (correct per spec). Good. But MAX_TURNS=16 is high — most scenarios should not need that many tool turns.",
+    "Pydantic v2 model_copy/model_dump used consistently — good.",
+    "ANTHROPIC_API_KEY missing returns 503 — correct.",
+    "No request-size/rate limiting on POST endpoints — acceptable for now but worth flagging.",
+    "data_store.json grows unbounded — no rotation/cap on scenarios+reports."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_energy_broker_v2.py (new)",
+    "/app/backend/data_store.json (cleaned up 2 orphan scenarios left by background completion of timed-out Claude call)"
+  ],
+  "success_rate": {
+    "backend_via_external_url": "14/18 = 78% (4 failures all due to ingress timeout, not app logic)",
+    "backend_via_localhost_full_flow": "100% — every endpoint in the spec works correctly when given time to complete"
+  },
+  "test_credentials": "none — no auth in this rewrite (verified /api/auth/login -> 404)",
+  "seed_data_creation": "Tests create/delete TEST_-prefixed clients with proper teardown. No persistent test data left in store.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "All schema/persistence/CRUD tests pass via external URL. The ONLY failing path is /scenarios/generate via the public ingress because Claude takes ~250s (gateway times out ~60s). To test the full flow without addressing the timeout, run against http://localhost:8001 (the test file is parameterizable via REACT_APP_BACKEND_URL env var). After E1 implements async generation, re-run test_energy_broker_v2.py against the external URL — it should pass fully. NOTE the orphan-scenarios issue: when the ingress returns 502 but Claude still completes, scenarios get persisted to disk pointing to potentially-deleted clients. Verify the fix prevents this.",
+  "rca_of_the_issue": {
+    "symptom": "POST /api/clients/{id}/scenarios/generate returns 502 'preview environment is not responding' from the public URL.",
+    "reproduction": "POST {{external}}/api/clients/{id}/scenarios/generate with body {'count': 2}. Returns 502 within ~60s.",
+    "root_cause": "Synchronous Claude tool-use loop in scenario_claude.generate_scenarios. For count=2 it makes 12+ Anthropic API calls (analyze + compare_retailers + multiple simulate_appliance_change + commit_scenario, twice). End-to-end took 246s on localhost. Kubernetes ingress / reverse proxy in the preview environment cuts the request at ~60s, so the FastAPI endpoint never gets to return its 200. The underlying Claude work continues to completion server-side and the scenarios DO get persisted — but the client has already received 502.",
+    "evidence": "Direct localhost call to /scenarios/generate with count=2 returned 200 in 246.6s with valid payload (scenarios=2, agent_memory=6, source=claude). External URL call to the same endpoint returned 502 within 60s. Two orphan scenarios were found in data_store.json belonging to a deleted test client after the ingress-timed-out call.",
+    "mitigation_options": [
+      "Switch to BackgroundTasks: return 202 with job_id, expose GET /api/scenarios/jobs/{job_id} to poll status.",
+      "Reduce per-call work: lower MAX_TURNS=16 -> 8, lower MAX_TOKENS, run scenarios in parallel via asyncio.gather, cache analyze_load_profile result so it's not recomputed per scenario.",
+      "Stream scenarios via SSE so the first one arrives within the gateway window."
+    ]
+  }
+}

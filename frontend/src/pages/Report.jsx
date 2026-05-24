@@ -1,448 +1,405 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { ChevronRight, Printer, AlertCircle, Loader, Zap } from 'lucide-react';
-import { getReport, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
+import {
+  ChevronRight, Download, AlertCircle, Loader, FileText, Trash2, Calendar, Plus,
+} from 'lucide-react';
+import {
+  getClient, listReports, getReport, deleteReport, fmtCurrency, fmtNumber, fmtPct,
+} from '../lib/api';
+import StackedAreaChart from '../components/StackedAreaChart';
 
-// ---------- Inline chart for print (pure SVG) ----------
-const X_LABELS = [
-  { bucket: 0, label: '12am' },
-  { bucket: 8, label: '4am' },
-  { bucket: 16, label: '8am' },
-  { bucket: 24, label: '12pm' },
-  { bucket: 32, label: '4pm' },
-  { bucket: 40, label: '8pm' },
-  { bucket: 47, label: '11:30pm' },
-];
+// ── PDF export via jspdf + html2canvas (loaded lazily) ─────────────────────
+async function exportPdf(node, filename) {
+  const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+    import('jspdf'),
+    import('html2canvas'),
+  ]);
+  const canvas = await html2canvas(node, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+  const imgData = canvas.toDataURL('image/png');
+  const pdf = new jsPDF('p', 'pt', 'a4');
+  const pdfW = pdf.internal.pageSize.getWidth();
+  const pdfH = pdf.internal.pageSize.getHeight();
+  const imgW = pdfW - 40;
+  const imgH = (canvas.height * imgW) / canvas.width;
+  let heightLeft = imgH;
+  let position = 20;
+  pdf.addImage(imgData, 'PNG', 20, position, imgW, imgH);
+  heightLeft -= pdfH - 40;
+  while (heightLeft > 0) {
+    position = heightLeft - imgH + 20;
+    pdf.addPage();
+    pdf.addImage(imgData, 'PNG', 20, position, imgW, imgH);
+    heightLeft -= pdfH - 40;
+  }
+  pdf.save(filename);
+}
 
-function ReportChart({ data, baselineData = null, height = 140 }) {
-  if (!data || data.length === 0) return null;
-  const svgW = 520, svgH = height;
-  const pL = 44, pR = 12, pT = 8, pB = 24;
-  const cW = svgW - pL - pR, cH = svgH - pT - pB;
-  const all = [...data, ...(baselineData || [])];
-  const maxV = Math.max(...all) * 1.1 || 1;
-  const xPos = (b) => pL + (b / 47) * cW;
-  const yPos = (v) => pT + cH - (v / maxV) * cH;
-  const buildPath = (arr) =>
-    arr.map((v, i) => `${i === 0 ? 'M' : 'L'}${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`).join(' ');
-
-  const touBands = [
-    { start: 0, end: 14, color: '#22c55e', opacity: 0.06 },
-    { start: 14, end: 30, color: '#f59e0b', opacity: 0.08 },
-    { start: 30, end: 42, color: '#ef4444', opacity: 0.10 },
-    { start: 42, end: 44, color: '#f59e0b', opacity: 0.08 },
-    { start: 44, end: 48, color: '#22c55e', opacity: 0.06 },
-  ];
+// ── Saved report rendering ─────────────────────────────────────────────────
+function ReportDocument({ report, innerRef }) {
+  const baseline = report.baseline || {};
+  const shape = baseline.shape_metrics || {};
+  const cost = baseline.cost_stack || {};
+  const scenarios = report.scenarios || [];
+  const tariff = report.tariff || {};
+  const generatedAt = new Date(report.created_at).toLocaleDateString('en-AU', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  });
+  const totalLow = scenarios.reduce((s, sc) => s + (sc.savings_annual_low || 0), 0);
+  const totalHigh = scenarios.reduce((s, sc) => s + (sc.savings_annual_high || 0), 0);
 
   return (
-    <div style={{ width: '100%' }}>
-      <svg viewBox={`0 0 ${svgW} ${svgH}`} style={{ width: '100%', height: 'auto' }}>
-        {touBands.map((b, i) => (
-          <rect key={i} x={xPos(b.start)} y={pT} width={xPos(b.end) - xPos(b.start)} height={cH}
-            fill={b.color} opacity={b.opacity} />
+    <div ref={innerRef} className="bg-white rounded-2xl overflow-hidden print-page" style={{ maxWidth: 820 }}>
+      {/* Cover */}
+      <div className="bg-forest-800 text-white px-10 py-12">
+        <div className="flex items-center gap-2 mb-8">
+          <div className="bg-lime rounded-md w-7 h-7 flex items-center justify-center">
+            <FileText size={14} className="text-forest-900" strokeWidth={2.5} />
+          </div>
+          <span className="font-display text-xl">EnergyScope</span>
+        </div>
+        <p className="text-[11px] uppercase tracking-[0.2em] text-lime/80 mb-2">Energy Analysis Report</p>
+        <h1 className="font-display text-4xl leading-tight">{report.title}</h1>
+        <div className="mt-6 pt-6 border-t border-forest-700 text-sm">
+          <p className="font-semibold">{report.client.name}</p>
+          {report.client.address && <p className="text-forest-100/70 text-xs mt-1">{report.client.address}</p>}
+          {report.client.nmi && <p className="text-forest-100/50 text-[11px] mt-1 font-mono">NMI · {report.client.nmi}</p>}
+          <p className="text-forest-100/60 text-xs mt-4">Generated {generatedAt}</p>
+        </div>
+      </div>
+
+      <div className="p-10 space-y-10 text-ink">
+        {/* Executive Summary */}
+        <section>
+          <h2 className="text-[11px] uppercase tracking-widest text-ink-mute mb-3">Executive summary</h2>
+          <div className="bg-violet/5 border border-violet/30 rounded-2xl p-5 text-sm leading-relaxed">
+            <p>
+              The site consumes <strong className="text-violet">{fmtNumber((shape.annual_kwh || 0) / 1000, 1)} MWh</strong> annually
+              at a peak demand of <strong className="text-violet">{fmtNumber(shape.peak_kw || 0, 1)} kW</strong>.
+              {scenarios.length > 0 && (
+                <>
+                  {' '}Across {scenarios.length} recommended scenario{scenarios.length === 1 ? '' : 's'}, projected savings are{' '}
+                  <strong className="text-violet">{fmtCurrency(totalLow)}–{fmtCurrency(totalHigh)}</strong> per year.
+                </>
+              )}
+            </p>
+          </div>
+        </section>
+
+        {/* Current tariff */}
+        <section>
+          <h2 className="text-[11px] uppercase tracking-widest text-ink-mute mb-3">Current tariff</h2>
+          <div className="border border-line rounded-xl p-4 text-sm">
+            <p className="font-semibold text-forest-900">{tariff.retailer} · {tariff.plan_name}</p>
+            <div className="grid grid-cols-3 gap-4 mt-3 text-xs">
+              <div><span className="text-ink-mute">Peak</span><br /><span className="tabnum text-forest-800 font-medium">{(tariff.energy_rates?.peak * 100 || 0).toFixed(1)} ¢/kWh</span></div>
+              <div><span className="text-ink-mute">Shoulder</span><br /><span className="tabnum text-forest-800 font-medium">{(tariff.energy_rates?.shoulder * 100 || 0).toFixed(1)} ¢/kWh</span></div>
+              <div><span className="text-ink-mute">Off-peak</span><br /><span className="tabnum text-forest-800 font-medium">{(tariff.energy_rates?.offpeak * 100 || 0).toFixed(1)} ¢/kWh</span></div>
+            </div>
+          </div>
+        </section>
+
+        {/* Cost breakdown */}
+        <section>
+          <h2 className="text-[11px] uppercase tracking-widest text-ink-mute mb-3">Baseline cost breakdown</h2>
+          <table className="w-full text-sm border border-line rounded-lg overflow-hidden">
+            <thead className="bg-cream-200">
+              <tr>
+                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider text-ink-mute">Line item</th>
+                <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider text-ink-mute">Annual</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ['Energy — Peak', cost.energy_peak],
+                ['Energy — Shoulder', cost.energy_shoulder],
+                ['Energy — Off-peak', cost.energy_offpeak],
+                ['Demand charge', cost.demand_charge],
+                ['Network', (cost.network_distribution || 0) + (cost.network_transmission || 0) + (cost.network_metering || 0)],
+                ['Fixed supply', cost.fixed_supply],
+                ['Environmental', cost.environmental],
+              ].filter(([_, v]) => v > 0).map(([label, v]) => (
+                <tr key={label} className="border-t border-line">
+                  <td className="px-3 py-2 text-ink-soft">{label}</td>
+                  <td className="px-3 py-2 text-right tabnum text-forest-900">{fmtCurrency(v)}</td>
+                </tr>
+              ))}
+              <tr className="border-t-2 border-forest-200 bg-cream-100">
+                <td className="px-3 py-2 font-semibold text-forest-900">Total annual</td>
+                <td className="px-3 py-2 text-right tabnum font-bold text-violet">{fmtCurrency(cost.total_annual || 0)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        {/* Scenarios */}
+        {scenarios.map((s, i) => (
+          <section key={s.id || i}>
+            <h2 className="text-[11px] uppercase tracking-widest text-ink-mute mb-3">
+              Scenario {i + 1}
+            </h2>
+            <div className="border border-line rounded-2xl p-5 bg-cream-50">
+              <div className="flex items-baseline justify-between mb-3 gap-4">
+                <h3 className="font-display text-xl text-forest-900">{s.name}</h3>
+                <p className="text-base font-display text-violet tabnum">
+                  {fmtCurrency(s.savings_annual_low)}–{fmtCurrency(s.savings_annual_high)} /yr
+                </p>
+              </div>
+              {s.rationale && <p className="text-sm text-ink-soft mb-4">{s.rationale}</p>}
+
+              {/* Load curve */}
+              {s.baseline_curve && s.shifted_curve && (
+                <div className="mb-4">
+                  <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">Hourly load — before vs after</p>
+                  <StackedAreaChart
+                    applianceCurves={s.baseline_appliance_curves || {}}
+                    scales={{}}
+                    height={180}
+                    baseline={s.baseline_curve}
+                    overlay={s.shifted_curve}
+                    showTooltip={false}
+                    testId={`report-scenario-chart-${i}`}
+                  />
+                </div>
+              )}
+
+              {/* Appliance changes summary */}
+              {s.appliance_changes && s.appliance_changes.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-2">Appliance changes</p>
+                  <ul className="text-xs space-y-1">
+                    {s.appliance_changes.map((c, j) => (
+                      <li key={j} className="flex items-start gap-2">
+                        <span className="font-semibold text-forest-800 min-w-[80px]">{c.appliance}</span>
+                        <span className="text-ink-soft">{c.summary}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Retailer + levers */}
+              {(s.retailer_winner || (s.negotiation_levers && s.negotiation_levers.length > 0)) && (
+                <div className="bg-violet/5 border border-violet/30 rounded-xl p-3">
+                  {s.retailer_winner && (
+                    <p className="text-xs mb-2">
+                      <span className="text-ink-mute">Recommended retailer: </span>
+                      <span className="font-semibold text-violet">{s.retailer_winner}</span>
+                    </p>
+                  )}
+                  {s.negotiation_levers && (
+                    <ul className="text-xs space-y-1">
+                      {s.negotiation_levers.map((lev, k) => (
+                        <li key={k} className="flex items-start gap-2 text-ink-soft">
+                          <span className="text-violet font-bold flex-shrink-0">→</span>
+                          <span>{lev}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
         ))}
-        {[0, 1, 2, 3].map((i) => {
-          const v = (maxV / 3) * i;
-          const y = yPos(v);
-          return (
-            <g key={i}>
-              <line x1={pL} y1={y} x2={pL + cW} y2={y} stroke="#e2e8f0" strokeWidth={0.8} />
-              <text x={pL - 4} y={y + 3} textAnchor="end" fontSize={7} fill="#94a3b8">{fmtNumber(v, 0)}</text>
-            </g>
-          );
-        })}
-        {baselineData && (
-          <path d={buildPath(baselineData)} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 2" />
+
+        {/* Total savings */}
+        {scenarios.length > 0 && (
+          <section>
+            <div className="bg-forest-800 text-white rounded-2xl p-6 text-center">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-lime mb-2">Total annual saving range</p>
+              <p className="font-display text-4xl tabnum">
+                {fmtCurrency(totalLow)} <span className="text-lime/60 text-2xl mx-2">–</span> {fmtCurrency(totalHigh)}
+              </p>
+              <p className="text-xs text-forest-100/60 mt-2">3-year estimate: {fmtCurrency(totalLow * 3)} – {fmtCurrency(totalHigh * 3)}</p>
+            </div>
+          </section>
         )}
-        <path d={buildPath(data)} fill="none" stroke="#6366f1" strokeWidth={2} strokeLinecap="round" />
-        {X_LABELS.map(({ bucket, label }) => (
-          <text key={bucket} x={xPos(bucket)} y={pT + cH + 14} textAnchor="middle" fontSize={7} fill="#94a3b8">
-            {label}
-          </text>
-        ))}
-      </svg>
+      </div>
+
+      <div className="border-t border-line px-10 py-4 bg-cream-100 flex items-center justify-between text-[11px] text-ink-mute">
+        <span>Generated by EnergyScope</span>
+        <span>{generatedAt}</span>
+      </div>
     </div>
   );
 }
 
-// ---------- Section wrapper ----------
-function Section({ title, children }) {
-  return (
-    <div className="mb-8">
-      <h2 className="text-base font-bold text-slate-800 border-b border-slate-200 pb-2 mb-4">{title}</h2>
-      {children}
-    </div>
-  );
-}
-
-// ---------- Cost stack table ----------
-function CostTable({ costStack }) {
-  if (!costStack) return null;
-  const rows = [
-    { label: 'Energy – Peak', value: costStack.energy_peak },
-    { label: 'Energy – Shoulder', value: costStack.energy_shoulder },
-    { label: 'Energy – Off-peak', value: costStack.energy_offpeak },
-    { label: 'Demand Charge', value: costStack.demand_charge },
-    {
-      label: 'Network (total)',
-      value: (costStack.network_distribution || 0) + (costStack.network_transmission || 0) + (costStack.network_metering || 0),
-    },
-    { label: 'Fixed Supply Charge', value: costStack.fixed_supply },
-    { label: 'Environmental', value: costStack.environmental },
-  ].filter((r) => r.value > 0);
-
-  const total = costStack.total_annual || rows.reduce((s, r) => s + r.value, 0);
-
-  return (
-    <table className="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
-      <thead>
-        <tr className="bg-slate-50">
-          <th className="text-left px-3 py-2 text-xs font-semibold text-slate-600">Line Item</th>
-          <th className="text-right px-3 py-2 text-xs font-semibold text-slate-600">Annual Cost</th>
-          <th className="text-right px-3 py-2 text-xs font-semibold text-slate-600">Share</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row, i) => (
-          <tr key={i} className="border-t border-slate-100">
-            <td className="px-3 py-2 text-slate-700">{row.label}</td>
-            <td className="px-3 py-2 text-right tabnum text-slate-800">{fmtCurrency(row.value)}</td>
-            <td className="px-3 py-2 text-right tabnum text-slate-400">{((row.value / total) * 100).toFixed(0)}%</td>
-          </tr>
-        ))}
-      </tbody>
-      <tfoot>
-        <tr className="border-t-2 border-slate-300 bg-slate-50">
-          <td className="px-3 py-2 font-bold text-slate-900">Total Annual</td>
-          <td className="px-3 py-2 text-right font-bold tabnum text-indigo-700">{fmtCurrency(total)}</td>
-          <td className="px-3 py-2 text-right text-slate-500">100%</td>
-        </tr>
-      </tfoot>
-    </table>
-  );
-}
-
+// ── Main page ──────────────────────────────────────────────────────────────
 export default function Report() {
   const { id } = useParams();
-  const [report, setReport] = useState(null);
+  const [params] = useSearchParams();
+  const focusId = params.get('focus');
+
+  const [client, setClient] = useState(null);
+  const [reports, setReports] = useState([]);
+  const [activeReport, setActiveReport] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
 
+  const docRef = useRef(null);
+
   useEffect(() => {
-    getReport(id)
-      .then((res) => setReport(res.data))
-      .catch((err) => setError(err.response?.data?.detail || 'Failed to load report.'))
-      .finally(() => setLoading(false));
-  }, [id]);
+    const fetch = async () => {
+      try {
+        const [clientRes, reportsRes] = await Promise.all([getClient(id), listReports(id)]);
+        setClient(clientRes.data);
+        sessionStorage.setItem(`client_name_${id}`, clientRes.data.name);
+        const list = reportsRes.data || [];
+        setReports(list);
+        if (focusId) {
+          const matched = list.find((r) => r.id === focusId);
+          if (matched) setActiveReport(matched);
+        }
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Failed to load reports.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetch();
+  }, [id, focusId]);
 
-  const handlePrint = () => window.print();
+  const openReport = async (rid) => {
+    try {
+      const res = await getReport(rid);
+      setActiveReport(res.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to open report.');
+    }
+  };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Loader size={24} className="animate-spin text-indigo-600" />
+  const handleDelete = async (rid) => {
+    if (!window.confirm('Delete this report?')) return;
+    await deleteReport(rid);
+    setReports((cur) => cur.filter((r) => r.id !== rid));
+    if (activeReport?.id === rid) setActiveReport(null);
+  };
+
+  const handleExport = async () => {
+    if (!docRef.current || !activeReport) return;
+    setExporting(true);
+    try {
+      const safe = (activeReport.title || 'report').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
+      await exportPdf(docRef.current, `${safe}.pdf`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="p-10 max-w-7xl" data-testid="reports-page">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.15em] text-ink-mute mb-3 no-print">
+        <Link to="/clients" className="hover:text-forest-700">Clients</Link>
+        <ChevronRight size={12} />
+        {client && (
+          <Link to={`/clients/${id}/baseline`} className="hover:text-forest-700 text-forest-800 font-medium">
+            {client.name}
+          </Link>
+        )}
+        <ChevronRight size={12} />
+        <span className="text-violet font-medium">Reports</span>
       </div>
-    );
-  }
 
-  if (error) {
-    return (
-      <div className="p-8">
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
+      <div className="flex items-end justify-between mb-8 gap-6 no-print">
+        <div>
+          <h1 className="font-display text-5xl text-forest-900 leading-none">Reports.</h1>
+          <p className="text-sm text-ink-soft mt-3 max-w-xl">
+            Saved snapshots you can share with clients. Pick scenarios on the Scenarios page, then click <em>Create report</em>.
+          </p>
+        </div>
+        {activeReport && (
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={exporting}
+            data-testid="download-pdf-btn"
+            className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-5 py-2.5 text-sm transition-all disabled:opacity-50"
+          >
+            {exporting ? <Loader size={14} className="animate-spin" /> : <Download size={14} />}
+            {exporting ? 'Building PDF…' : 'Download PDF'}
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm mb-6 no-print">
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
-      </div>
-    );
-  }
+      )}
 
-  const client = report?.client || {};
-  const baseline = report?.baseline || {};
-  const scenarios = report?.scenarios || [];
-  const savings = report?.savings || {};
-  const generatedAt = report?.generated_at
-    ? new Date(report.generated_at).toLocaleDateString('en-AU', {
-        day: 'numeric', month: 'long', year: 'numeric',
-      })
-    : new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' });
-
-  const costStack = baseline?.cost_stack || {};
-  const shapeMetrics = baseline?.shape_metrics || {};
-  const loadCurve = baseline?.load_curve || [];
-  const shiftedCurve = report?.shifted_curve || null;
-
-  const totalSavLow = savings.total_low;
-  const totalSavHigh = savings.total_high;
-  const billingTotal = savings.billing_defensible?.total;
-  const indicativeLow = savings.indicative?.contract_low;
-  const indicativeHigh = savings.indicative?.contract_high;
-
-  return (
-    <div className="min-h-screen bg-slate-50">
-      <style>{`
-        @media print {
-          .no-print { display: none !important; }
-          body { background: white; }
-          .print-page { box-shadow: none !important; margin: 0 !important; max-width: 100% !important; }
-        }
-      `}</style>
-
-      {/* Controls bar (no-print) */}
-      <div className="no-print bg-white border-b border-slate-200 px-8 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-sm text-slate-500">
-          <Link to="/clients" className="hover:text-indigo-600 transition-colors">Clients</Link>
-          <ChevronRight size={14} />
-          <Link to={`/clients/${id}/scenarios`} className="hover:text-indigo-600 transition-colors font-medium text-slate-700">
-            {client.name || 'Client'}
-          </Link>
-          <ChevronRight size={14} />
-          <span className="text-slate-900 font-medium">Report</span>
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader size={22} className="animate-spin text-violet" />
         </div>
-        <div className="flex items-center gap-3">
-          <Link
-            to={`/clients/${id}/scenarios`}
-            className="text-sm text-slate-600 hover:text-indigo-600 transition-colors"
-          >
-            ← Back to Scenarios
-          </Link>
-          <button
-            onClick={handlePrint}
-            className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
-          >
-            <Printer size={15} />
-            Print / Export PDF
-          </button>
-        </div>
-      </div>
-
-      {/* Report page */}
-      <div className="print-page max-w-3xl mx-auto bg-white shadow-sm my-6 rounded-xl overflow-hidden">
-        {/* Report Header */}
-        <div className="bg-slate-900 text-white px-8 py-8">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="bg-indigo-600 rounded-lg p-2">
-              <Zap size={18} className="text-white" />
-            </div>
-            <span className="text-lg font-semibold">EnergyScope</span>
-          </div>
-          <h1 className="text-2xl font-bold mb-1">Energy Analysis Report</h1>
-          <p className="text-slate-400 text-sm">Generated {generatedAt}</p>
-          <div className="mt-5 pt-5 border-t border-slate-700">
-            <p className="text-lg font-medium">{client.name}</p>
-            {client.address && <p className="text-slate-400 text-sm mt-1">{client.address}</p>}
-            {client.nmi && (
-              <p className="text-slate-500 text-xs mt-1 font-mono">NMI: {client.nmi}</p>
-            )}
-          </div>
-        </div>
-
-        {/* Report body */}
-        <div className="px-8 py-8">
-
-          {/* 1. Executive Summary */}
-          <Section title="Executive Summary">
-            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 text-sm text-indigo-900 leading-relaxed">
-              {totalSavLow && totalSavHigh ? (
-                <p>
-                  Analysis of {client.name || 'this site'} indicates an annual consumption of{' '}
-                  <strong>{shapeMetrics.annual_kwh ? fmtNumber(shapeMetrics.annual_kwh / 1000, 1) + ' MWh' : '—'}</strong>{' '}
-                  at a peak demand of{' '}
-                  <strong>{shapeMetrics.peak_kw ? fmtNumber(shapeMetrics.peak_kw, 1) + ' kW' : '—'}</strong>.{' '}
-                  Recommended load-management scenarios project total savings of{' '}
-                  <strong>{fmtCurrency(totalSavLow)}–{fmtCurrency(totalSavHigh)}</strong> per year,
-                  comprising billing-defensible energy and demand reductions plus indicative contract uplift.
-                </p>
-              ) : (
-                <p>
-                  This report summarises the baseline energy analysis for{' '}
-                  {client.name || 'this site'}, including load profile characteristics, cost breakdown, and recommended optimisation scenarios.
-                </p>
-              )}
-            </div>
-          </Section>
-
-          {/* 2. Baseline Profile */}
-          <Section title="Baseline Load Profile">
-            {loadCurve.length > 0 && (
-              <div className="mb-5">
-                <p className="text-xs text-slate-500 mb-2">Typical Weekday Load Profile</p>
-                <ReportChart data={loadCurve} height={140} />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
+          {/* Left rail — reports list */}
+          <aside className="lg:col-span-2 space-y-3 no-print">
+            <h2 className="text-[11px] uppercase tracking-wider text-ink-mute">Saved reports</h2>
+            {reports.length === 0 ? (
+              <div className="border-2 border-dashed border-line rounded-2xl p-6 text-center bg-cream-50">
+                <FileText size={20} className="mx-auto text-ink-mute mb-2" />
+                <p className="text-xs text-ink-soft mb-3">No reports yet.</p>
+                <Link
+                  to={`/clients/${id}/scenarios`}
+                  data-testid="goto-scenarios-link"
+                  className="inline-flex items-center gap-1 text-xs text-violet hover:text-violet-700 font-semibold"
+                >
+                  <Plus size={12} /> Create one from Scenarios
+                </Link>
               </div>
-            )}
-
-            {/* Shape metrics */}
-            {(shapeMetrics.load_factor || shapeMetrics.peak_kw || shapeMetrics.annual_kwh) && (
-              <div className="grid grid-cols-4 gap-3 mb-5">
-                {shapeMetrics.load_factor != null && (
-                  <div className="bg-slate-50 rounded-lg p-3 text-center">
-                    <p className="text-xs text-slate-500 mb-1">Load Factor</p>
-                    <p className="text-lg font-bold text-emerald-600 tabnum">
-                      {fmtPct(shapeMetrics.load_factor / 100, 0)}
+            ) : (
+              <div className="space-y-2" data-testid="reports-list">
+                {reports.map((r) => (
+                  <div
+                    key={r.id}
+                    data-testid={`report-item-${r.id}`}
+                    className={`border rounded-xl p-3 cursor-pointer transition-all ${
+                      activeReport?.id === r.id ? 'border-violet bg-violet/5 ring-2 ring-violet/20' : 'border-line bg-cream-50 hover:border-forest-300'
+                    }`}
+                    onClick={() => openReport(r.id)}
+                  >
+                    <p className="font-semibold text-sm text-forest-900 truncate">{r.title}</p>
+                    <p className="text-[11px] text-ink-mute mt-1 flex items-center gap-1">
+                      <Calendar size={10} />
+                      {new Date(r.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}
                     </p>
-                  </div>
-                )}
-                {shapeMetrics.peak_kw != null && (
-                  <div className="bg-slate-50 rounded-lg p-3 text-center">
-                    <p className="text-xs text-slate-500 mb-1">Peak Demand</p>
-                    <p className="text-lg font-bold text-amber-600 tabnum">
-                      {fmtNumber(shapeMetrics.peak_kw, 1)} kW
-                    </p>
-                  </div>
-                )}
-                {shapeMetrics.peak_coincidence != null && (
-                  <div className="bg-slate-50 rounded-lg p-3 text-center">
-                    <p className="text-xs text-slate-500 mb-1">Peak Coincidence</p>
-                    <p className="text-lg font-bold text-red-600 tabnum">
-                      {fmtPct(shapeMetrics.peak_coincidence / 100, 0)}
-                    </p>
-                  </div>
-                )}
-                {shapeMetrics.annual_kwh != null && (
-                  <div className="bg-slate-50 rounded-lg p-3 text-center">
-                    <p className="text-xs text-slate-500 mb-1">Annual Use</p>
-                    <p className="text-lg font-bold text-indigo-700 tabnum">
-                      {fmtNumber(shapeMetrics.annual_kwh / 1000, 1)} MWh
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <CostTable costStack={costStack} />
-          </Section>
-
-          {/* 3. Recommended Scenarios */}
-          {scenarios && scenarios.length > 0 && (
-            <Section title="Recommended Scenario(s)">
-              <div className="space-y-3">
-                {scenarios.map((s, i) => (
-                  <div key={i} className="border border-slate-200 rounded-xl p-4">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-semibold text-slate-900">{s.name}</span>
-                      {s.type && (
-                        <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-xs">
-                          {s.type}
-                        </span>
-                      )}
-                    </div>
-                    {s.description && (
-                      <p className="text-sm text-slate-600 mb-2">{s.description}</p>
-                    )}
-                    {s.parameters && Object.keys(s.parameters).length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {Object.entries(s.parameters).map(([k, v]) => (
-                          <span key={k} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-mono">
-                            {k}: {String(v)}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <p className="text-[11px] text-ink-mute">{(r.scenarios || []).length} scenario{(r.scenarios || []).length === 1 ? '' : 's'}</p>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); handleDelete(r.id); }}
+                      className="mt-2 text-[11px] inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
+                    >
+                      <Trash2 size={11} /> Delete
+                    </button>
                   </div>
                 ))}
               </div>
-            </Section>
-          )}
+            )}
+          </aside>
 
-          {/* 4. Savings Projection */}
-          {(billingTotal || indicativeLow || totalSavLow) && (
-            <Section title="Savings Projection">
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                {billingTotal != null && (
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-                    <p className="text-xs font-semibold text-emerald-700 uppercase tracking-wide mb-3">
-                      Billing-Defensible Savings
-                    </p>
-                    {savings.billing_defensible?.energy != null && (
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-slate-600">Energy savings</span>
-                        <span className="font-medium tabnum text-emerald-700">
-                          {fmtCurrency(savings.billing_defensible.energy)}
-                        </span>
-                      </div>
-                    )}
-                    {savings.billing_defensible?.demand != null && (
-                      <div className="flex justify-between text-sm mb-2">
-                        <span className="text-slate-600">Demand savings</span>
-                        <span className="font-medium tabnum text-emerald-700">
-                          {fmtCurrency(savings.billing_defensible.demand)}
-                        </span>
-                      </div>
-                    )}
-                    <div className="flex justify-between text-sm border-t border-emerald-200 pt-2">
-                      <span className="font-bold text-slate-900">Total</span>
-                      <span className="font-bold tabnum text-emerald-700">{fmtCurrency(billingTotal)}</span>
-                    </div>
-                  </div>
-                )}
-                {(indicativeLow != null || indicativeHigh != null) && (
-                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                    <p className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-3">
-                      Indicative Contract Uplift
-                    </p>
-                    <p className="text-xl font-bold text-blue-700 tabnum text-center mt-4">
-                      {fmtCurrency(indicativeLow)}
-                      <span className="text-sm font-normal text-blue-400 mx-1">–</span>
-                      {fmtCurrency(indicativeHigh)}
-                    </p>
-                    <p className="text-xs text-blue-500 text-center mt-1">indicative range</p>
-                  </div>
-                )}
+          {/* Right — active report */}
+          <div className="lg:col-span-5">
+            {activeReport ? (
+              <ReportDocument report={activeReport} innerRef={docRef} />
+            ) : (
+              <div className="border-2 border-dashed border-line rounded-3xl p-16 text-center bg-cream-50">
+                <FileText size={32} className="mx-auto text-ink-mute mb-3" />
+                <h3 className="font-display text-2xl text-forest-900 mb-1">
+                  {reports.length === 0 ? 'Nothing to report — yet.' : 'Select a report'}
+                </h3>
+                <p className="text-sm text-ink-mute max-w-md mx-auto">
+                  {reports.length === 0
+                    ? 'Generate scenarios first, then bundle them into a report from the Scenarios page.'
+                    : 'Pick one from the left to preview it here. The PDF export button will appear in the header.'}
+                </p>
               </div>
-
-              {totalSavLow != null && totalSavHigh != null && (
-                <div className="bg-indigo-600 text-white rounded-xl p-5 mb-4">
-                  <p className="text-sm font-semibold mb-2">Total Annual Saving Range</p>
-                  <p className="text-2xl font-bold tabnum">
-                    {fmtCurrency(totalSavLow)}
-                    <span className="text-lg font-normal text-indigo-300 mx-2">–</span>
-                    {fmtCurrency(totalSavHigh)}
-                  </p>
-                  <p className="text-indigo-300 text-xs mt-1">per year</p>
-                </div>
-              )}
-
-              {/* 3-year estimate */}
-              {totalSavLow != null && totalSavHigh != null && (
-                <div className="border border-slate-200 rounded-xl p-4 bg-slate-50">
-                  <p className="text-sm font-semibold text-slate-700 mb-2">3-Year Total Estimate</p>
-                  <p className="text-xl font-bold text-indigo-700 tabnum">
-                    {fmtCurrency(totalSavLow * 3)}
-                    <span className="text-base font-normal text-slate-400 mx-2">–</span>
-                    {fmtCurrency(totalSavHigh * 3)}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">Based on savings × 3 years (indicative)</p>
-                </div>
-              )}
-            </Section>
-          )}
-
-          {/* 5. New Load Profile (overlay chart) */}
-          {shiftedCurve && loadCurve.length > 0 && (
-            <Section title="New Load Profile">
-              <p className="text-xs text-slate-500 mb-2">Baseline vs. Optimised</p>
-              <ReportChart data={shiftedCurve} baselineData={loadCurve} height={140} />
-              <div className="flex items-center gap-4 mt-2 text-xs text-slate-500">
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-8 border-t-2 border-dashed border-slate-400" />
-                  Baseline
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block w-8 border-t-2 border-indigo-600" />
-                  Optimised
-                </span>
-              </div>
-            </Section>
-          )}
+            )}
+          </div>
         </div>
-
-        {/* Footer */}
-        <div className="border-t border-slate-200 px-8 py-4 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
-          <span>Generated by EnergyScope</span>
-          <span>
-            {generatedAt}
-          </span>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

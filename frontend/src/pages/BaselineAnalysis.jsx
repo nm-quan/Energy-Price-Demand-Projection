@@ -1,20 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, ArrowRight, AlertCircle, X, Sparkles } from 'lucide-react';
-import { getBaseline, getClient, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
+import { ChevronRight, ArrowRight, AlertCircle, RotateCcw } from 'lucide-react';
+import { getBaseline, getClient, recalcBaseline, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import AppliancePanel from '../components/AppliancePanel';
 
-const DEMO_CLIENT_ID = 'client-demo-001';
-
 const COST_COLORS = {
-  energy_peak: '#ef4444',
-  energy_shoulder: '#f59e0b',
-  energy_offpeak: '#22c55e',
-  demand_charge: '#8b5cf6',
-  network: '#64748b',
-  fixed_supply: '#94a3b8',
-  environmental: '#10b981',
+  energy_peak: '#c44d3a',
+  energy_shoulder: '#d4a843',
+  energy_offpeak: '#3a6a5d',
+  demand_charge: '#5b4bff',
+  network: '#7a8a87',
+  fixed_supply: '#a89280',
+  environmental: '#1a504a',
 };
 
 const COST_LABELS = {
@@ -29,7 +27,6 @@ const COST_LABELS = {
 
 function CostStackChart({ costStack }) {
   if (!costStack) return null;
-
   const items = [
     { key: 'energy_peak', value: costStack.energy_peak },
     { key: 'energy_shoulder', value: costStack.energy_shoulder },
@@ -50,149 +47,52 @@ function CostStackChart({ costStack }) {
   const maxVal = Math.max(...items.map((i) => i.value));
 
   return (
-    <div className="space-y-2" data-testid="cost-stack-chart">
+    <div className="space-y-2.5" data-testid="cost-stack-chart">
       {items.map((item) => {
         const pct = (item.value / total) * 100;
         const barPct = (item.value / maxVal) * 100;
         return (
           <div key={item.key} className="flex items-center gap-3">
-            <div className="w-28 text-right text-xs text-slate-600 flex-shrink-0">
-              {COST_LABELS[item.key]}
-            </div>
-            <div className="flex-1 bg-slate-100 rounded-full h-5 relative overflow-hidden">
+            <div className="w-28 text-right text-xs text-ink-soft flex-shrink-0">{COST_LABELS[item.key]}</div>
+            <div className="flex-1 bg-cream-200 rounded-full h-5 relative overflow-hidden">
               <div
                 className="h-full rounded-full transition-all"
-                style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.85 }}
+                style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.9 }}
               />
             </div>
-            <div className="w-20 text-right text-xs font-medium text-forest-900 tabnum flex-shrink-0">
+            <div className="w-20 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">
               {fmtCurrency(item.value)}
             </div>
-            <div className="w-10 text-right text-xs text-slate-400 tabnum flex-shrink-0">
-              {pct.toFixed(0)}%
-            </div>
+            <div className="w-10 text-right text-xs text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
           </div>
         );
       })}
-      <div className="flex items-center gap-3 border-t border-slate-200 pt-2 mt-1">
-        <div className="w-28 text-right text-xs font-semibold text-forest-900">Total</div>
+      <div className="flex items-center gap-3 border-t border-line pt-3 mt-2">
+        <div className="w-28 text-right text-xs font-semibold text-forest-900">Total annual</div>
         <div className="flex-1" />
-        <div className="w-20 text-right text-sm font-bold text-forest-900 tabnum flex-shrink-0">
-          {fmtCurrency(total)}
-        </div>
-        <div className="w-10 text-right text-xs text-slate-500 tabnum">100%</div>
+        <div className="w-20 text-right text-base font-bold text-violet tabnum flex-shrink-0">{fmtCurrency(total)}</div>
+        <div className="w-10 text-right text-xs text-ink-mute tabnum">100%</div>
       </div>
-      <p className="text-xs text-slate-400 text-right">per year</p>
     </div>
   );
 }
 
-function MetricCard({ label, value, unit, hint, color = 'text-forest-800', testId }) {
+function MetricCard({ label, value, unit, hint, accent = 'forest', testId }) {
+  const accentClass = {
+    forest: 'text-forest-800',
+    violet: 'text-violet',
+    lime: 'text-lime-700',
+    amber: 'text-amber-600',
+    red: 'text-red-600',
+  }[accent];
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm" data-testid={testId}>
-      <p className="text-xs text-slate-500 mb-1">{label}</p>
-      <p className={`text-xl font-bold tabnum ${color}`}>
+    <div className="bg-cream-50 border border-line rounded-2xl p-4 shadow-card" data-testid={testId}>
+      <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">{label}</p>
+      <p className={`text-2xl font-display tabnum ${accentClass}`}>
         {value}
-        {unit && <span className="text-sm font-normal text-slate-400 ml-1">{unit}</span>}
+        {unit && <span className="text-sm font-normal text-ink-mute ml-1">{unit}</span>}
       </p>
-      {hint && <p className="text-xs text-slate-400 mt-1">{hint}</p>}
-    </div>
-  );
-}
-
-function CostBreakdownTable({ costStack }) {
-  if (!costStack) return null;
-
-  const rows = [
-    { label: 'Energy – Peak', cost: costStack.energy_peak, color: COST_COLORS.energy_peak },
-    { label: 'Energy – Shoulder', cost: costStack.energy_shoulder, color: COST_COLORS.energy_shoulder },
-    { label: 'Energy – Off-peak', cost: costStack.energy_offpeak, color: COST_COLORS.energy_offpeak },
-    ...(costStack.demand_charge ? [{ label: 'Demand Charge', cost: costStack.demand_charge, color: COST_COLORS.demand_charge }] : []),
-    ...(costStack.network_distribution ? [{ label: 'Network – Distribution', cost: costStack.network_distribution, color: COST_COLORS.network }] : []),
-    ...(costStack.network_transmission ? [{ label: 'Network – Transmission', cost: costStack.network_transmission, color: COST_COLORS.network }] : []),
-    ...(costStack.network_metering ? [{ label: 'Network – Metering', cost: costStack.network_metering, color: COST_COLORS.network }] : []),
-    ...(costStack.fixed_supply ? [{ label: 'Fixed Supply Charge', cost: costStack.fixed_supply, color: COST_COLORS.fixed_supply }] : []),
-    ...(costStack.environmental ? [{ label: 'Environmental / LRET', cost: costStack.environmental, color: COST_COLORS.environmental }] : []),
-  ].filter((r) => r.cost > 0);
-
-  const total = costStack.total_annual || rows.reduce((s, r) => s + r.cost, 0);
-
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-slate-200">
-            <th className="text-left text-xs font-medium text-slate-500 pb-2">Line Item</th>
-            <th className="text-right text-xs font-medium text-slate-500 pb-2">Annual Cost</th>
-            <th className="text-right text-xs font-medium text-slate-500 pb-2">Share</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-b border-slate-100">
-              <td className="py-2 flex items-center gap-2">
-                <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: row.color }} />
-                <span className="text-slate-700">{row.label}</span>
-              </td>
-              <td className="py-2 text-right text-forest-900 tabnum">{fmtCurrency(row.cost)}</td>
-              <td className="py-2 text-right text-slate-400 tabnum">
-                {((row.cost / total) * 100).toFixed(0)}%
-              </td>
-            </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr>
-            <td className="pt-3 font-semibold text-forest-900">Total Annual</td>
-            <td className="pt-3 text-right font-bold text-forest-900 tabnum">{fmtCurrency(total)}</td>
-            <td className="pt-3 text-right text-slate-500">100%</td>
-          </tr>
-        </tfoot>
-      </table>
-    </div>
-  );
-}
-
-function SkeletonSection() {
-  return (
-    <div className="animate-pulse space-y-4">
-      <div className="h-6 bg-slate-200 rounded w-1/3" />
-      <div className="h-48 bg-slate-100 rounded-xl" />
-      <div className="grid grid-cols-4 gap-3">
-        {[1, 2, 3, 4].map((i) => (<div key={i} className="h-20 bg-slate-100 rounded-xl" />))}
-      </div>
-    </div>
-  );
-}
-
-function DemoBanner() {
-  const [open, setOpen] = useState(true);
-  if (!open) return null;
-  return (
-    <div
-      data-testid="demo-banner"
-      className="mb-4 flex items-start gap-3 bg-lime-100 border border-lime-300 text-forest-900 rounded-xl px-4 py-3"
-    >
-      <Sparkles size={18} className="text-lime-700 mt-0.5 flex-shrink-0" />
-      <div className="flex-1 text-sm">
-        This is a demo site. Explore the baseline and scenarios, or create your own client.
-      </div>
-      <Link
-        to="/clients/new"
-        data-testid="demo-new-client-link"
-        className="inline-flex items-center gap-1 text-sm font-semibold text-forest-800 hover:text-forest-900"
-      >
-        New Client <ArrowRight size={14} />
-      </Link>
-      <button
-        type="button"
-        onClick={() => setOpen(false)}
-        data-testid="demo-banner-close"
-        className="text-forest-700 hover:text-forest-900"
-        aria-label="Dismiss"
-      >
-        <X size={16} />
-      </button>
+      {hint && <p className="text-xs text-ink-mute mt-1">{hint}</p>}
     </div>
   );
 }
@@ -204,10 +104,9 @@ export default function BaselineAnalysis() {
   const [client, setClient] = useState(null);
   const [baseline, setBaseline] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [recalcing, setRecalcing] = useState(false);
   const [error, setError] = useState('');
-  const [noTariff, setNoTariff] = useState(false);
 
-  // Appliance UI state
   const [enabled, setEnabled] = useState(
     Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, true]))
   );
@@ -218,7 +117,8 @@ export default function BaselineAnalysis() {
     Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, 1]))
   );
 
-  const isDemo = id === DEMO_CLIENT_ID;
+  const recalcTimer = useRef(null);
+  const initialBaseline = useRef(null);
 
   useEffect(() => {
     if (!id) return;
@@ -227,25 +127,12 @@ export default function BaselineAnalysis() {
       setError('');
       try {
         const [clientRes, baselineRes] = await Promise.all([getClient(id), getBaseline(id)]);
-        const c = clientRes.data;
-        setClient(c);
-        sessionStorage.setItem(`client_name_${id}`, c.name);
+        setClient(clientRes.data);
+        sessionStorage.setItem(`client_name_${id}`, clientRes.data.name);
         setBaseline(baselineRes.data);
+        initialBaseline.current = baselineRes.data;
       } catch (err) {
-        if (err.response?.status === 422 || err.response?.status === 404) {
-          try {
-            const clientRes = await getClient(id);
-            setClient(clientRes.data);
-          } catch (_) {}
-          const detail = err.response?.data?.detail || '';
-          if (detail.toLowerCase().includes('tariff')) {
-            setNoTariff(true);
-          } else {
-            setError(detail || 'Could not load baseline analysis.');
-          }
-        } else {
-          setError(err.response?.data?.detail || 'Failed to load baseline analysis.');
-        }
+        setError(err.response?.data?.detail || 'Failed to load baseline analysis.');
       } finally {
         setLoading(false);
       }
@@ -253,10 +140,27 @@ export default function BaselineAnalysis() {
     fetchAll();
   }, [id]);
 
+  // Debounced recalc whenever scales change (skip on first load)
+  useEffect(() => {
+    if (!initialBaseline.current) return;
+    if (recalcTimer.current) clearTimeout(recalcTimer.current);
+    recalcTimer.current = setTimeout(async () => {
+      setRecalcing(true);
+      try {
+        const res = await recalcBaseline(id, scales);
+        setBaseline(res.data);
+      } catch (_) {
+        // ignore
+      } finally {
+        setRecalcing(false);
+      }
+    }, 350);
+    return () => recalcTimer.current && clearTimeout(recalcTimer.current);
+  }, [scales, id]);
+
   const handleToggle = (name) => {
     setEnabled((prev) => {
       const newEnabled = { ...prev, [name]: !prev[name] };
-      // Restore last scale when toggling on, save current scale when toggling off
       if (newEnabled[name]) {
         setScales((s) => ({ ...s, [name]: lastScales[name] || 1 }));
       } else {
@@ -275,35 +179,37 @@ export default function BaselineAnalysis() {
     }
   };
 
+  const resetScales = () => {
+    const ones = Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, 1]));
+    setScales(ones);
+    setLastScales(ones);
+    setEnabled(Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, true])));
+  };
+
   const metrics = baseline?.shape_metrics || {};
   const costStack = baseline?.cost_stack || {};
   const applianceCurves = baseline?.appliance_curves || {};
 
-  return (
-    <div className="p-8" data-testid="baseline-page">
-      {isDemo && <DemoBanner />}
+  const isModified = Object.values(scales).some((v) => Math.abs(v - 1) > 0.001);
 
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm text-slate-500 mb-2">
-        <Link to="/clients" className="hover:text-forest-700 transition-colors">Clients</Link>
-        <ChevronRight size={14} />
-        {client ? (
-          <>
-            <span className="text-slate-700 font-medium">{client.name}</span>
-            <ChevronRight size={14} />
-          </>
-        ) : null}
-        <span className="text-forest-900 font-medium">Baseline Analysis</span>
+  return (
+    <div className="p-10 max-w-7xl" data-testid="baseline-page">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.15em] text-ink-mute mb-3">
+        <Link to="/clients" className="hover:text-forest-700">Clients</Link>
+        <ChevronRight size={12} />
+        {client && <span className="text-forest-800 font-medium">{client.name}</span>}
+        <ChevronRight size={12} />
+        <span className="text-violet font-medium">Baseline</span>
       </div>
 
       {client && (
-        <div className="mb-6">
-          <h1 className="text-2xl font-semibold text-forest-900">{client.name}</h1>
-          <div className="flex items-center gap-4 mt-1 text-sm text-slate-500">
+        <div className="mb-8">
+          <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
+          <div className="flex items-center gap-4 mt-3 text-sm text-ink-soft">
             {client.address && <span>{client.address}</span>}
             {client.nmi && (
-              <span className="font-mono text-xs bg-mint px-2 py-0.5 rounded border border-forest-100">
-                NMI: {client.nmi}
+              <span className="font-mono text-[11px] bg-cream-100 px-2 py-0.5 rounded border border-line">
+                NMI · {client.nmi}
               </span>
             )}
           </div>
@@ -312,28 +218,13 @@ export default function BaselineAnalysis() {
 
       {loading && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          <div className="lg:col-span-3"><SkeletonSection /></div>
-          <div className="lg:col-span-2"><SkeletonSection /></div>
-        </div>
-      )}
-
-      {!loading && noTariff && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 flex items-start gap-3">
-          <AlertCircle size={20} className="text-amber-600 flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="text-amber-800 font-medium mb-1">Tariff not configured</p>
-            <p className="text-amber-700 text-sm mb-3">
-              A tariff must be selected before baseline cost analysis can be run.
-            </p>
-            <Link to={`/clients/new`} className="inline-flex items-center gap-2 text-sm font-medium text-forest-700 hover:text-forest-900">
-              Set up tariff <ArrowRight size={14} />
-            </Link>
-          </div>
+          <div className="lg:col-span-3 h-96 bg-cream-100 rounded-2xl animate-pulse" />
+          <div className="lg:col-span-2 h-96 bg-cream-100 rounded-2xl animate-pulse" />
         </div>
       )}
 
       {!loading && error && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
@@ -343,21 +234,36 @@ export default function BaselineAnalysis() {
         <>
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
             <div className="lg:col-span-3 space-y-4">
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-forest-900 mb-4">
-                  Typical Weekday Load Profile
-                </h2>
-                <StackedAreaChart
-                  applianceCurves={applianceCurves}
-                  scales={scales}
-                  height={260}
-                />
-                <div className="mt-4 pt-4 border-t border-slate-100">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-xs font-semibold text-forest-900 uppercase tracking-wide">
+              <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">
+                    Typical Weekday Load
+                  </h2>
+                  {recalcing && (
+                    <span className="text-[11px] text-violet animate-pulse" data-testid="recalc-indicator">
+                      recalculating…
+                    </span>
+                  )}
+                </div>
+                <StackedAreaChart applianceCurves={applianceCurves} scales={{}} height={260} />
+                <div className="mt-5 pt-5 border-t border-line">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-[11px] font-semibold text-forest-900 uppercase tracking-wider">
                       Appliance Mix
                     </h3>
-                    <span className="text-xs text-slate-500">Toggle off or rescale (0–200%)</span>
+                    <div className="flex items-center gap-3 text-[11px] text-ink-mute">
+                      <span>0–200% scale</span>
+                      {isModified && (
+                        <button
+                          type="button"
+                          onClick={resetScales}
+                          data-testid="reset-scales-btn"
+                          className="inline-flex items-center gap-1 text-violet hover:text-violet-700"
+                        >
+                          <RotateCcw size={11} /> reset
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <AppliancePanel
                     scales={scales}
@@ -369,58 +275,32 @@ export default function BaselineAnalysis() {
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <MetricCard
-                  label="Load Factor"
-                  value={metrics.load_factor != null ? fmtPct(metrics.load_factor, 0) : '—'}
-                  hint="Avg ÷ peak"
-                  color="text-forest-700"
-                  testId="metric-load-factor"
-                />
-                <MetricCard
-                  label="Peak Demand"
-                  value={metrics.peak_kw != null ? fmtNumber(metrics.peak_kw, 1) : '—'}
-                  unit="kW"
-                  color="text-amber-600"
-                  testId="metric-peak-kw"
-                />
-                <MetricCard
-                  label="Peak Coincidence"
-                  value={metrics.peak_coincidence != null ? fmtPct(metrics.peak_coincidence, 0) : '—'}
-                  hint="Load in peak window"
-                  color="text-red-600"
-                  testId="metric-peak-coincidence"
-                />
-                <MetricCard
-                  label="Annual Consumption"
-                  value={metrics.annual_kwh != null ? fmtNumber(metrics.annual_kwh / 1000, 1) : '—'}
-                  unit="MWh"
-                  color="text-forest-800"
-                  testId="metric-annual-kwh"
-                />
+                <MetricCard label="Load Factor" value={fmtPct(metrics.load_factor || 0, 0)} hint="Avg ÷ peak" accent="forest" testId="metric-load-factor" />
+                <MetricCard label="Peak Demand" value={fmtNumber(metrics.peak_kw || 0, 1)} unit="kW" accent="amber" testId="metric-peak-kw" />
+                <MetricCard label="Peak Coincidence" value={fmtPct(metrics.peak_coincidence || 0, 0)} hint="Load in 3–9pm" accent="red" testId="metric-peak-coincidence" />
+                <MetricCard label="Annual" value={fmtNumber((metrics.annual_kwh || 0) / 1000, 1)} unit="MWh" accent="violet" testId="metric-annual-kwh" />
               </div>
             </div>
 
             <div className="lg:col-span-2 space-y-4">
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-forest-900 mb-5">Annual Cost Breakdown</h2>
+              <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6">
+                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider mb-5">Annual Cost</h2>
                 <CostStackChart costStack={costStack} />
-              </div>
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-forest-900 mb-4">Cost Detail</h2>
-                <CostBreakdownTable costStack={costStack} />
               </div>
             </div>
           </div>
 
-          <div className="mt-8 flex items-center justify-between border-t border-forest-100 pt-6">
-            <p className="text-sm text-slate-600">Ready to explore savings opportunities?</p>
+          <div className="mt-10 flex items-center justify-between border-t border-line pt-6">
+            <p className="text-sm text-ink-soft">
+              Adjust the appliance sliders above — metrics and cost update live.
+            </p>
             <button
               onClick={() => navigate(`/clients/${id}/scenarios`)}
               data-testid="build-scenarios-btn"
-              className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-semibold rounded-lg px-6 py-2.5 text-sm transition-colors"
+              className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-6 py-3 text-sm transition-all"
             >
               Build Scenarios
-              <ArrowRight size={16} />
+              <ArrowRight size={15} />
             </button>
           </div>
         </>

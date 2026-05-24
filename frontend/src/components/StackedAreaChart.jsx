@@ -1,16 +1,16 @@
 import React, { useState, useMemo } from 'react';
 import { fmtNumber } from '../lib/api';
 
-// Fixed appliance order (bottom→top of stack) with colors per Change 2 spec
+// Fixed appliance order (bottom→top of stack)
 export const APPLIANCE_LAYERS = [
-  { key: 'Fridges', color: '#64748b' },
-  { key: 'Espresso', color: '#f97316' },
-  { key: 'Ovens', color: '#ef4444' },
-  { key: 'HVAC', color: '#0ea5e9' },
-  { key: 'Lighting', color: '#eab308' },
-  { key: 'Dishwasher', color: '#22c55e' },
-  { key: 'Hot Water', color: '#a855f7' },
-  { key: 'Misc', color: '#ec4899' },
+  { key: 'Fridges', color: '#3a6a5d' },
+  { key: 'Espresso', color: '#d4a843' },
+  { key: 'Ovens', color: '#c44d3a' },
+  { key: 'HVAC', color: '#5b4bff' },
+  { key: 'Lighting', color: '#c4e94a' },
+  { key: 'Dishwasher', color: '#1a504a' },
+  { key: 'Hot Water', color: '#8a6cf5' },
+  { key: 'Misc', color: '#a89280' },
 ];
 
 const X_LABELS = [
@@ -23,24 +23,12 @@ const X_LABELS = [
   { bucket: 47, label: '12am' },
 ];
 
-// TOU band overlays — per Change 2 spec
 const TOU_BANDS = [
-  { start: 30, end: 42, color: 'rgba(239,68,68,0.08)', label: 'Peak' },
-  { start: 14, end: 30, color: 'rgba(245,158,11,0.08)', label: 'Shoulder' },
-  { start: 42, end: 44, color: 'rgba(245,158,11,0.08)', label: 'Shoulder' },
+  { start: 30, end: 42, color: 'rgba(196,77,58,0.07)' },     // peak
+  { start: 14, end: 30, color: 'rgba(212,168,67,0.07)' },    // shoulder
+  { start: 42, end: 44, color: 'rgba(212,168,67,0.07)' },    // shoulder evening
 ];
 
-/**
- * StackedAreaChart
- * Renders an 8-appliance stacked area chart on top of TOU band overlays.
- *
- * Props:
- *  - applianceCurves: { [name]: number[48] }
- *  - scales: { [name]: number }   (0..2)
- *  - height: number
- *  - baseline?: number[48]        (optional fade outline for compare mode)
- *  - overlay?: number[48]         (optimised curve, drawn on top as a line)
- */
 export default function StackedAreaChart({
   applianceCurves,
   scales,
@@ -48,6 +36,7 @@ export default function StackedAreaChart({
   baseline = null,
   overlay = null,
   showTooltip = true,
+  testId = 'stacked-area-chart',
 }) {
   const [hoverBucket, setHoverBucket] = useState(null);
 
@@ -66,7 +55,6 @@ export default function StackedAreaChart({
     });
   }, [applianceCurves, scales]);
 
-  // Cumulative stack values for each bucket
   const stackedTotals = useMemo(() => {
     const totals = [];
     for (let b = 0; b < 48; b++) {
@@ -87,13 +75,11 @@ export default function StackedAreaChart({
   const xPos = (b) => padL + (b / 47) * cW;
   const yPos = (v) => padT + cH - (v / maxVal) * cH;
 
-  // Build polygon for each layer (stacked from bottom to top)
   const polygons = useMemo(() => {
     const polys = [];
     const baseStack = new Array(48).fill(0);
     for (const layer of layers) {
       const topStack = baseStack.map((v, i) => v + (layer.scaled[i] || 0));
-      // Polygon: across the top, then back across the bottom
       const topPath = topStack
         .map((v, i) => `${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`)
         .join(' ');
@@ -105,7 +91,8 @@ export default function StackedAreaChart({
       for (let i = 0; i < 48; i++) baseStack[i] = topStack[i];
     }
     return polys;
-  }, [layers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers, maxVal]);
 
   const buildLinePath = (arr) =>
     arr.map((v, i) => `${i === 0 ? 'M' : 'L'}${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`).join(' ');
@@ -113,7 +100,6 @@ export default function StackedAreaChart({
   const yTicks = 4;
   const yTickStep = maxVal / yTicks;
 
-  // Hover handling
   const handleMove = (e) => {
     if (!showTooltip) return;
     const svgRect = e.currentTarget.getBoundingClientRect();
@@ -131,9 +117,8 @@ export default function StackedAreaChart({
         style={{ width: '100%', height: 'auto' }}
         onMouseMove={handleMove}
         onMouseLeave={() => setHoverBucket(null)}
-        data-testid="stacked-area-chart"
+        data-testid={testId}
       >
-        {/* TOU band overlays (drawn FIRST, behind everything) */}
         {TOU_BANDS.map((band, idx) => (
           <rect
             key={idx}
@@ -145,70 +130,56 @@ export default function StackedAreaChart({
           />
         ))}
 
-        {/* Y-axis grid lines */}
         {Array.from({ length: yTicks + 1 }, (_, i) => {
           const val = yTickStep * i;
           const y = yPos(val);
           return (
             <g key={i}>
-              <line x1={padL} y1={y} x2={padL + cW} y2={y} stroke="#e2e8f0" strokeWidth={1} />
-              <text x={padL - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#94a3b8">
+              <line x1={padL} y1={y} x2={padL + cW} y2={y} stroke="#e0dbc9" strokeWidth={1} />
+              <text x={padL - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#7a8a87">
                 {fmtNumber(val, 1)}
               </text>
             </g>
           );
         })}
 
-        {/* Stacked area polygons */}
         {polygons.map((p) => (
           <polygon
             key={p.key}
             points={p.points}
             fill={p.color}
-            fillOpacity={0.78}
+            fillOpacity={0.82}
             stroke={p.color}
             strokeWidth={0.5}
-            strokeOpacity={0.4}
+            strokeOpacity={0.6}
           />
         ))}
 
-        {/* Baseline outline (dashed) */}
         {baseline && (
-          <path d={buildLinePath(baseline)} fill="none" stroke="#0F2A26" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.55} />
+          <path d={buildLinePath(baseline)} fill="none" stroke="#0d2e2a" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.55} />
         )}
 
-        {/* Overlay (optimised) curve */}
         {overlay && (
-          <path d={buildLinePath(overlay)} fill="none" stroke="#14532d" strokeWidth={2.2} strokeLinecap="round" />
+          <path d={buildLinePath(overlay)} fill="none" stroke="#5b4bff" strokeWidth={2.4} strokeLinecap="round" />
         )}
 
-        {/* X-axis labels */}
         {X_LABELS.map(({ bucket, label }) => (
-          <text key={bucket} x={xPos(bucket)} y={padT + cH + 18} textAnchor="middle" fontSize={10} fill="#475569">
+          <text key={bucket} x={xPos(bucket)} y={padT + cH + 18} textAnchor="middle" fontSize={10} fill="#3a4d4a">
             {label}
           </text>
         ))}
 
-        {/* Y-axis label */}
-        <text x={12} y={padT + cH / 2} textAnchor="middle" fontSize={10} fill="#475569"
+        <text x={12} y={padT + cH / 2} textAnchor="middle" fontSize={10} fill="#3a4d4a"
           transform={`rotate(-90, 12, ${padT + cH / 2})`}>
           kW
         </text>
 
-        {/* Hover tooltip line */}
         {hoverBucket != null && (
-          <g>
-            <line
-              x1={xPos(hoverBucket)}
-              y1={padT}
-              x2={xPos(hoverBucket)}
-              y2={padT + cH}
-              stroke="#14532d"
-              strokeWidth={1}
-              strokeDasharray="2 2"
-              opacity={0.6}
-            />
-          </g>
+          <line
+            x1={xPos(hoverBucket)} y1={padT}
+            x2={xPos(hoverBucket)} y2={padT + cH}
+            stroke="#5b4bff" strokeWidth={1} strokeDasharray="2 2" opacity={0.7}
+          />
         )}
       </svg>
 
