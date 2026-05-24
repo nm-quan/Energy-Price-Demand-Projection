@@ -1,8 +1,10 @@
 import axios from 'axios';
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
+
 const api = axios.create({
-  baseURL: 'http://localhost:8001',
-  timeout: 30000,
+  baseURL: BACKEND_URL,
+  timeout: 120000,
 });
 
 export const getClients = () => api.get('/api/clients');
@@ -24,6 +26,8 @@ export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
 
 export const getScenarioLibrary = () => api.get('/api/scenarios/library');
 export const runScenarios = (id, scenarios) => api.post(`/api/clients/${id}/scenarios/run`, { scenarios });
+export const generateScenarios = (id, extraInstruction = null) =>
+  api.post(`/api/clients/${id}/scenarios/generate`, { extra_instruction: extraInstruction });
 
 export const getReport = (id) => api.get(`/api/clients/${id}/report`);
 

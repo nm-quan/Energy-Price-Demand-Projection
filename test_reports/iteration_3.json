@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 3 (Energy Broker — Brunswick East Café demo + Termina palette + Claude scenarios + appliance panel) fully validated end-to-end. 9/9 backend pytest tests pass. Frontend flows (clients → baseline → scenarios) work, all required data-testids are present, no JS errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Scenarios page", "issues": ["Scenario #3 'Small behind-the-meter battery' shows negative annual saving ('-$1,211 – -$914'). Sorting by total_low desc puts a net-cost scenario last as #3, which is technically correct but may be confusing to brokers — consider hiding scenarios with negative total_high or labelling them as 'net cost' rather than 'Annual saving'. Minor cosmetic concern."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_energy_broker_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:574 generate_client_scenarios — cached scenarios are served even if the cached source was 'fallback' (no way to invalidate). If pre-warm fires before ANTHROPIC_API_KEY is loaded the user can be stuck on fallback indefinitely. Consider only caching when source startswith('claude').",
+    "server.py:208 _prewarm_demo_scenarios — runs in a daemon thread without locking; if startup_event fires twice (rare under uvicorn --reload) two parallel Claude calls could race against data_store.client_scenarios. Add a simple flag/lock.",
+    "scenario_claude.py is invoked synchronously inside a sync FastAPI endpoint; on a fresh extra_instruction call the request blocks the event-loop thread for ~30s. With Cloudflare 60s timeout this is tight. Consider making the endpoint async + run_in_threadpool.",
+    "data_store.save_to_disk() is called inside the hot baseline endpoint (every GET /baseline). On high traffic this is wasteful disk I/O. Cache or move to a write-behind queue.",
+    "models — _id from MongoDB is not a concern here because data_store uses an in-memory dict + JSON file persistence (no Mongo reads exposed)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_energy_broker_api.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a — app has no authentication",
+  "seed_data_creation": "Used backend's built-in demo seed (client-demo-001 'Brunswick East Café' + tariff-agl-tou-vic). No additional seeding needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend: 9/9 pytest tests in /app/backend/tests/test_energy_broker_api.py pass (run: pytest /app/backend/tests/test_energy_broker_api.py -v). Covered: /api/health, list/get clients (demo present with correct name/annual_kwh/tariff), 404 paths, /api/tariffs (AGL TOU with peak/shoulder/offpeak/flat rates), /api/clients/{id}/baseline (48-bucket load_curve, cost_stack total $9,143 within $8000–$11000, shape_metrics, 8-key appliance_curves whose per-bucket sum equals load_curve), POST /scenarios/generate with empty body (cached, sorted by total_low desc, ranks 1..N), POST with extra_instruction='Show me battery options' (returns fresh non-cached Claude scenarios ~30s, X-Scenario-Source != claude-cached), 404 for unknown client. Frontend: Verified on production URL https://kwh-savings.preview.emergentagent.com — sidebar bg rgb(20,83,45) forest, lime buttons rgb(132,204,22), DEMO badge on demo card, navigation Clients→Baseline→Scenarios works, demo-banner shows + dismisses, stacked-area-chart with 8 layers + TOU red/amber bands + 12am/4am/8am/12pm/4pm/8pm/12am x-axis labels, appliance-panel with 8 chips (Fridges/Espresso/Ovens/HVAC/Lighting/Dishwasher/Hot Water/Misc) each with toggle + slider. Toggling Fridges off dims chip (opacity 1→0.6) and sets slider value to 0; setting HVAC slider to 150 persists. Metric cards show Load Factor 44% / Peak 5.8kW / Coincidence 8% / 22.9 MWh. Scenarios page auto-generates on first load (no claude-loading observed since pre-warmed cache served instantly), 3 ranked scenarios visible, ranks #1 #2 #3 with rationales + type chips + saving ranges, 'Show details' expands chart + 4 saving cards, regenerate-btn + followup-form/input/submit all present, sessionStorage 'scenarios_client-demo-001' is set, followup submit shows claude-loading then refreshes scenarios. Zero JavaScript page errors during entire flow.",
+  "rca of the issue": "No issues to RCA. Minor design suggestion: rank-3 battery scenario surfaces negative savings; consider filtering scenarios with total_high<=0 or labelling them differently to avoid confusing brokers."
+}

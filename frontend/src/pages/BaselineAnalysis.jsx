@@ -1,203 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, ArrowRight, AlertCircle, Loader } from 'lucide-react';
+import { ChevronRight, ArrowRight, AlertCircle, X, Sparkles } from 'lucide-react';
 import { getBaseline, getClient, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
+import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import AppliancePanel from '../components/AppliancePanel';
 
-// TOU period definitions (bucket indices)
-const TOU_PERIODS = {
-  peak: { start: 30, end: 42, color: '#ef4444', label: 'Peak', opacity: 0.12 },
-  shoulder_am: { start: 14, end: 30, color: '#f59e0b', label: 'Shoulder', opacity: 0.10 },
-  shoulder_pm: { start: 42, end: 44, color: '#f59e0b', label: 'Shoulder', opacity: 0.10 },
-  offpeak: { start: 0, end: 14, color: '#22c55e', label: 'Off-peak', opacity: 0.07 },
-  offpeak2: { start: 44, end: 48, color: '#22c55e', label: 'Off-peak', opacity: 0.07 },
-};
-
-const X_LABELS = [
-  { bucket: 0, label: '12am' },
-  { bucket: 8, label: '4am' },
-  { bucket: 16, label: '8am' },
-  { bucket: 24, label: '12pm' },
-  { bucket: 32, label: '4pm' },
-  { bucket: 40, label: '8pm' },
-  { bucket: 47, label: '11:30pm' },
-];
-
-function LoadCurveChart({ data, height = 200, showBaseline = false, baselineData = null, compact = false }) {
-  if (!data || data.length === 0) return null;
-
-  const svgWidth = 600;
-  const svgHeight = height;
-  const padL = 50, padR = 16, padT = 12, padB = 28;
-  const chartW = svgWidth - padL - padR;
-  const chartH = svgHeight - padT - padB;
-
-  const allData = [...data, ...(baselineData || [])];
-  const maxVal = Math.max(...allData) * 1.08 || 1;
-  const minVal = 0;
-
-  const xPos = (bucket) => padL + (bucket / 47) * chartW;
-  const yPos = (val) => padT + chartH - ((val - minVal) / (maxVal - minVal)) * chartH;
-
-  // Build smooth polyline path
-  const buildPath = (arr) =>
-    arr
-      .map((v, i) => `${i === 0 ? 'M' : 'L'}${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`)
-      .join(' ');
-
-  const buildAreaPath = (arr) => {
-    const line = buildPath(arr);
-    const lastX = xPos(arr.length - 1).toFixed(1);
-    const firstX = xPos(0).toFixed(1);
-    const base = yPos(0).toFixed(1);
-    return `${line} L${lastX},${base} L${firstX},${base} Z`;
-  };
-
-  const touBands = [
-    { ...TOU_PERIODS.offpeak },
-    { ...TOU_PERIODS.offpeak2 },
-    { ...TOU_PERIODS.shoulder_am },
-    { ...TOU_PERIODS.shoulder_pm },
-    { ...TOU_PERIODS.peak },
-  ];
-
-  const yTicks = 4;
-  const yTickStep = maxVal / yTicks;
-
-  return (
-    <div style={{ width: '100%', overflowX: 'auto' }}>
-      <svg
-        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-        preserveAspectRatio="xMidYMid meet"
-        style={{ width: '100%', height: 'auto' }}
-      >
-        {/* TOU band overlays */}
-        {touBands.map((band, idx) => (
-          <rect
-            key={idx}
-            x={xPos(band.start)}
-            y={padT}
-            width={xPos(Math.min(band.end, 47)) - xPos(band.start)}
-            height={chartH}
-            fill={band.color}
-            opacity={band.opacity}
-          />
-        ))}
-
-        {/* Y-axis grid lines */}
-        {Array.from({ length: yTicks + 1 }, (_, i) => {
-          const val = (yTickStep * i);
-          const y = yPos(val);
-          return (
-            <g key={i}>
-              <line
-                x1={padL}
-                y1={y}
-                x2={padL + chartW}
-                y2={y}
-                stroke="#e2e8f0"
-                strokeWidth={1}
-              />
-              <text x={padL - 5} y={y + 4} textAnchor="end" fontSize={9} fill="#94a3b8">
-                {fmtNumber(val, 0)}
-              </text>
-            </g>
-          );
-        })}
-
-        {/* Baseline area fill (if overlay mode) */}
-        {showBaseline && baselineData && (
-          <path
-            d={buildAreaPath(baselineData)}
-            fill="#94a3b8"
-            opacity={0.12}
-          />
-        )}
-
-        {/* Main area fill */}
-        <path
-          d={buildAreaPath(data)}
-          fill={showBaseline ? 'none' : '#6366f1'}
-          opacity={showBaseline ? 0 : 0.08}
-        />
-
-        {/* Baseline line (overlay) */}
-        {showBaseline && baselineData && (
-          <path
-            d={buildPath(baselineData)}
-            fill="none"
-            stroke="#94a3b8"
-            strokeWidth={2}
-            strokeDasharray="4 3"
-          />
-        )}
-
-        {/* Main line */}
-        <path
-          d={buildPath(data)}
-          fill="none"
-          stroke={showBaseline ? '#6366f1' : '#6366f1'}
-          strokeWidth={2}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-
-        {/* X-axis labels */}
-        {X_LABELS.map(({ bucket, label }) => (
-          <text
-            key={bucket}
-            x={xPos(bucket)}
-            y={padT + chartH + 16}
-            textAnchor="middle"
-            fontSize={9}
-            fill="#94a3b8"
-          >
-            {label}
-          </text>
-        ))}
-
-        {/* Y-axis label */}
-        <text
-          x={10}
-          y={padT + chartH / 2}
-          textAnchor="middle"
-          fontSize={9}
-          fill="#94a3b8"
-          transform={`rotate(-90, 10, ${padT + chartH / 2})`}
-        >
-          kW
-        </text>
-
-        {/* Legend */}
-        {showBaseline && (
-          <g transform={`translate(${padL + 8}, ${padT + 8})`}>
-            <rect x={0} y={0} width={60} height={32} rx={4} fill="white" opacity={0.85} />
-            <line x1={6} y1={10} x2={20} y2={10} stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" />
-            <text x={24} y={13} fontSize={8} fill="#64748b">Baseline</text>
-            <line x1={6} y1={22} x2={20} y2={22} stroke="#6366f1" strokeWidth={2} />
-            <text x={24} y={25} fontSize={8} fill="#64748b">Optimised</text>
-          </g>
-        )}
-
-        {/* TOU legend */}
-        {!compact && (
-          <g transform={`translate(${padL + chartW - 160}, ${padT + 4})`}>
-            <rect x={0} y={0} width={160} height={20} rx={3} fill="white" opacity={0.85} />
-            {[
-              { color: '#ef4444', label: 'Peak' },
-              { color: '#f59e0b', label: 'Shoulder' },
-              { color: '#22c55e', label: 'Off-peak' },
-            ].map((item, i) => (
-              <g key={i} transform={`translate(${i * 52 + 4}, 4)`}>
-                <rect x={0} y={3} width={9} height={9} rx={2} fill={item.color} opacity={0.5} />
-                <text x={12} y={11} fontSize={8} fill="#64748b">{item.label}</text>
-              </g>
-            ))}
-          </g>
-        )}
-      </svg>
-    </div>
-  );
-}
+const DEMO_CLIENT_ID = 'client-demo-001';
 
 const COST_COLORS = {
   energy_peak: '#ef4444',
@@ -242,7 +50,7 @@ function CostStackChart({ costStack }) {
   const maxVal = Math.max(...items.map((i) => i.value));
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-testid="cost-stack-chart">
       {items.map((item) => {
         const pct = (item.value / total) * 100;
         const barPct = (item.value / maxVal) * 100;
@@ -254,14 +62,10 @@ function CostStackChart({ costStack }) {
             <div className="flex-1 bg-slate-100 rounded-full h-5 relative overflow-hidden">
               <div
                 className="h-full rounded-full transition-all"
-                style={{
-                  width: `${barPct}%`,
-                  backgroundColor: COST_COLORS[item.key],
-                  opacity: 0.85,
-                }}
+                style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.85 }}
               />
             </div>
-            <div className="w-20 text-right text-xs font-medium text-slate-800 tabnum flex-shrink-0">
+            <div className="w-20 text-right text-xs font-medium text-forest-900 tabnum flex-shrink-0">
               {fmtCurrency(item.value)}
             </div>
             <div className="w-10 text-right text-xs text-slate-400 tabnum flex-shrink-0">
@@ -271,9 +75,9 @@ function CostStackChart({ costStack }) {
         );
       })}
       <div className="flex items-center gap-3 border-t border-slate-200 pt-2 mt-1">
-        <div className="w-28 text-right text-xs font-semibold text-slate-900">Total</div>
+        <div className="w-28 text-right text-xs font-semibold text-forest-900">Total</div>
         <div className="flex-1" />
-        <div className="w-20 text-right text-sm font-bold text-indigo-700 tabnum flex-shrink-0">
+        <div className="w-20 text-right text-sm font-bold text-forest-900 tabnum flex-shrink-0">
           {fmtCurrency(total)}
         </div>
         <div className="w-10 text-right text-xs text-slate-500 tabnum">100%</div>
@@ -283,9 +87,9 @@ function CostStackChart({ costStack }) {
   );
 }
 
-function MetricCard({ label, value, unit, hint, color = 'text-indigo-700' }) {
+function MetricCard({ label, value, unit, hint, color = 'text-forest-800', testId }) {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+    <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm" data-testid={testId}>
       <p className="text-xs text-slate-500 mb-1">{label}</p>
       <p className={`text-xl font-bold tabnum ${color}`}>
         {value}
@@ -300,42 +104,15 @@ function CostBreakdownTable({ costStack }) {
   if (!costStack) return null;
 
   const rows = [
-    {
-      label: 'Energy – Peak',
-      rate: 'TOU peak rate',
-      cost: costStack.energy_peak,
-      color: COST_COLORS.energy_peak,
-    },
-    {
-      label: 'Energy – Shoulder',
-      rate: 'TOU shoulder rate',
-      cost: costStack.energy_shoulder,
-      color: COST_COLORS.energy_shoulder,
-    },
-    {
-      label: 'Energy – Off-peak',
-      rate: 'TOU off-peak rate',
-      cost: costStack.energy_offpeak,
-      color: COST_COLORS.energy_offpeak,
-    },
-    ...(costStack.demand_charge
-      ? [{ label: 'Demand Charge', rate: '$/kW/mo', cost: costStack.demand_charge, color: COST_COLORS.demand_charge }]
-      : []),
-    ...(costStack.network_distribution
-      ? [{ label: 'Network – Distribution', rate: 'c/kWh', cost: costStack.network_distribution, color: COST_COLORS.network }]
-      : []),
-    ...(costStack.network_transmission
-      ? [{ label: 'Network – Transmission', rate: 'c/kWh', cost: costStack.network_transmission, color: COST_COLORS.network }]
-      : []),
-    ...(costStack.network_metering
-      ? [{ label: 'Network – Metering', rate: '$/day', cost: costStack.network_metering, color: COST_COLORS.network }]
-      : []),
-    ...(costStack.fixed_supply
-      ? [{ label: 'Fixed Supply Charge', rate: '$/day', cost: costStack.fixed_supply, color: COST_COLORS.fixed_supply }]
-      : []),
-    ...(costStack.environmental
-      ? [{ label: 'Environmental / LRET', rate: 'c/kWh', cost: costStack.environmental, color: COST_COLORS.environmental }]
-      : []),
+    { label: 'Energy – Peak', cost: costStack.energy_peak, color: COST_COLORS.energy_peak },
+    { label: 'Energy – Shoulder', cost: costStack.energy_shoulder, color: COST_COLORS.energy_shoulder },
+    { label: 'Energy – Off-peak', cost: costStack.energy_offpeak, color: COST_COLORS.energy_offpeak },
+    ...(costStack.demand_charge ? [{ label: 'Demand Charge', cost: costStack.demand_charge, color: COST_COLORS.demand_charge }] : []),
+    ...(costStack.network_distribution ? [{ label: 'Network – Distribution', cost: costStack.network_distribution, color: COST_COLORS.network }] : []),
+    ...(costStack.network_transmission ? [{ label: 'Network – Transmission', cost: costStack.network_transmission, color: COST_COLORS.network }] : []),
+    ...(costStack.network_metering ? [{ label: 'Network – Metering', cost: costStack.network_metering, color: COST_COLORS.network }] : []),
+    ...(costStack.fixed_supply ? [{ label: 'Fixed Supply Charge', cost: costStack.fixed_supply, color: COST_COLORS.fixed_supply }] : []),
+    ...(costStack.environmental ? [{ label: 'Environmental / LRET', cost: costStack.environmental, color: COST_COLORS.environmental }] : []),
   ].filter((r) => r.cost > 0);
 
   const total = costStack.total_annual || rows.reduce((s, r) => s + r.cost, 0);
@@ -354,13 +131,10 @@ function CostBreakdownTable({ costStack }) {
           {rows.map((row, i) => (
             <tr key={i} className="border-b border-slate-100">
               <td className="py-2 flex items-center gap-2">
-                <span
-                  className="inline-block w-2 h-2 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: row.color }}
-                />
+                <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: row.color }} />
                 <span className="text-slate-700">{row.label}</span>
               </td>
-              <td className="py-2 text-right text-slate-800 tabnum">{fmtCurrency(row.cost)}</td>
+              <td className="py-2 text-right text-forest-900 tabnum">{fmtCurrency(row.cost)}</td>
               <td className="py-2 text-right text-slate-400 tabnum">
                 {((row.cost / total) * 100).toFixed(0)}%
               </td>
@@ -369,8 +143,8 @@ function CostBreakdownTable({ costStack }) {
         </tbody>
         <tfoot>
           <tr>
-            <td className="pt-3 font-semibold text-slate-900">Total Annual</td>
-            <td className="pt-3 text-right font-bold text-indigo-700 tabnum">{fmtCurrency(total)}</td>
+            <td className="pt-3 font-semibold text-forest-900">Total Annual</td>
+            <td className="pt-3 text-right font-bold text-forest-900 tabnum">{fmtCurrency(total)}</td>
             <td className="pt-3 text-right text-slate-500">100%</td>
           </tr>
         </tfoot>
@@ -385,10 +159,40 @@ function SkeletonSection() {
       <div className="h-6 bg-slate-200 rounded w-1/3" />
       <div className="h-48 bg-slate-100 rounded-xl" />
       <div className="grid grid-cols-4 gap-3">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="h-20 bg-slate-100 rounded-xl" />
-        ))}
+        {[1, 2, 3, 4].map((i) => (<div key={i} className="h-20 bg-slate-100 rounded-xl" />))}
       </div>
+    </div>
+  );
+}
+
+function DemoBanner() {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  return (
+    <div
+      data-testid="demo-banner"
+      className="mb-4 flex items-start gap-3 bg-lime-100 border border-lime-300 text-forest-900 rounded-xl px-4 py-3"
+    >
+      <Sparkles size={18} className="text-lime-700 mt-0.5 flex-shrink-0" />
+      <div className="flex-1 text-sm">
+        This is a demo site. Explore the baseline and scenarios, or create your own client.
+      </div>
+      <Link
+        to="/clients/new"
+        data-testid="demo-new-client-link"
+        className="inline-flex items-center gap-1 text-sm font-semibold text-forest-800 hover:text-forest-900"
+      >
+        New Client <ArrowRight size={14} />
+      </Link>
+      <button
+        type="button"
+        onClick={() => setOpen(false)}
+        data-testid="demo-banner-close"
+        className="text-forest-700 hover:text-forest-900"
+        aria-label="Dismiss"
+      >
+        <X size={16} />
+      </button>
     </div>
   );
 }
@@ -403,58 +207,85 @@ export default function BaselineAnalysis() {
   const [error, setError] = useState('');
   const [noTariff, setNoTariff] = useState(false);
 
+  // Appliance UI state
+  const [enabled, setEnabled] = useState(
+    Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, true]))
+  );
+  const [scales, setScales] = useState(
+    Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, 1]))
+  );
+  const [lastScales, setLastScales] = useState(
+    Object.fromEntries(APPLIANCE_LAYERS.map(({ key }) => [key, 1]))
+  );
+
+  const isDemo = id === DEMO_CLIENT_ID;
+
   useEffect(() => {
     if (!id) return;
-
-    // Cache client name for sidebar
     const fetchAll = async () => {
       setLoading(true);
       setError('');
       try {
-        const [clientRes, baselineRes] = await Promise.all([
-          getClient(id),
-          getBaseline(id),
-        ]);
+        const [clientRes, baselineRes] = await Promise.all([getClient(id), getBaseline(id)]);
         const c = clientRes.data;
         setClient(c);
         sessionStorage.setItem(`client_name_${id}`, c.name);
         setBaseline(baselineRes.data);
       } catch (err) {
         if (err.response?.status === 422 || err.response?.status === 404) {
-          // Likely no tariff / no data
           try {
             const clientRes = await getClient(id);
             setClient(clientRes.data);
           } catch (_) {}
           const detail = err.response?.data?.detail || '';
-          if (detail.toLowerCase().includes('tariff') || detail.toLowerCase().includes('no tariff')) {
+          if (detail.toLowerCase().includes('tariff')) {
             setNoTariff(true);
           } else {
-            setError(detail || 'Could not load baseline analysis. Ensure interval data and tariff are configured.');
+            setError(detail || 'Could not load baseline analysis.');
           }
         } else {
-          setError(
-            err.response?.data?.detail ||
-              'Failed to load baseline analysis. Please try again.'
-          );
+          setError(err.response?.data?.detail || 'Failed to load baseline analysis.');
         }
       } finally {
         setLoading(false);
       }
     };
-
     fetchAll();
   }, [id]);
 
+  const handleToggle = (name) => {
+    setEnabled((prev) => {
+      const newEnabled = { ...prev, [name]: !prev[name] };
+      // Restore last scale when toggling on, save current scale when toggling off
+      if (newEnabled[name]) {
+        setScales((s) => ({ ...s, [name]: lastScales[name] || 1 }));
+      } else {
+        setLastScales((s) => ({ ...s, [name]: scales[name] || 1 }));
+        setScales((s) => ({ ...s, [name]: 0 }));
+      }
+      return newEnabled;
+    });
+  };
+
+  const handleScaleChange = (name, value) => {
+    setScales((s) => ({ ...s, [name]: value }));
+    setLastScales((s) => ({ ...s, [name]: value }));
+    if (value > 0 && !enabled[name]) {
+      setEnabled((e) => ({ ...e, [name]: true }));
+    }
+  };
+
   const metrics = baseline?.shape_metrics || {};
   const costStack = baseline?.cost_stack || {};
-  const loadCurve = baseline?.load_curve || [];
+  const applianceCurves = baseline?.appliance_curves || {};
 
   return (
-    <div className="p-8">
-      {/* Breadcrumb + header */}
+    <div className="p-8" data-testid="baseline-page">
+      {isDemo && <DemoBanner />}
+
+      {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm text-slate-500 mb-2">
-        <Link to="/clients" className="hover:text-indigo-600 transition-colors">Clients</Link>
+        <Link to="/clients" className="hover:text-forest-700 transition-colors">Clients</Link>
         <ChevronRight size={14} />
         {client ? (
           <>
@@ -462,17 +293,16 @@ export default function BaselineAnalysis() {
             <ChevronRight size={14} />
           </>
         ) : null}
-        <span className="text-slate-900 font-medium">Baseline Analysis</span>
+        <span className="text-forest-900 font-medium">Baseline Analysis</span>
       </div>
 
-      {/* Client header */}
       {client && (
         <div className="mb-6">
-          <h1 className="text-2xl font-semibold text-slate-900">{client.name}</h1>
+          <h1 className="text-2xl font-semibold text-forest-900">{client.name}</h1>
           <div className="flex items-center gap-4 mt-1 text-sm text-slate-500">
             {client.address && <span>{client.address}</span>}
             {client.nmi && (
-              <span className="font-mono text-xs bg-slate-100 px-2 py-0.5 rounded">
+              <span className="font-mono text-xs bg-mint px-2 py-0.5 rounded border border-forest-100">
                 NMI: {client.nmi}
               </span>
             )}
@@ -480,7 +310,6 @@ export default function BaselineAnalysis() {
         </div>
       )}
 
-      {/* Loading */}
       {loading && (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
           <div className="lg:col-span-3"><SkeletonSection /></div>
@@ -488,7 +317,6 @@ export default function BaselineAnalysis() {
         </div>
       )}
 
-      {/* No tariff state */}
       {!loading && noTariff && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 flex items-start gap-3">
           <AlertCircle size={20} className="text-amber-600 flex-shrink-0 mt-0.5" />
@@ -497,17 +325,13 @@ export default function BaselineAnalysis() {
             <p className="text-amber-700 text-sm mb-3">
               A tariff must be selected before baseline cost analysis can be run.
             </p>
-            <Link
-              to={`/clients/new`}
-              className="inline-flex items-center gap-2 text-sm font-medium text-indigo-700 hover:text-indigo-900"
-            >
+            <Link to={`/clients/new`} className="inline-flex items-center gap-2 text-sm font-medium text-forest-700 hover:text-forest-900">
               Set up tariff <ArrowRight size={14} />
             </Link>
           </div>
         </div>
       )}
 
-      {/* General error */}
       {!loading && error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
@@ -515,77 +339,85 @@ export default function BaselineAnalysis() {
         </div>
       )}
 
-      {/* Main content */}
       {!loading && baseline && (
         <>
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-            {/* Left: Load curve + shape metrics */}
             <div className="lg:col-span-3 space-y-4">
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-slate-700 mb-4">
+                <h2 className="text-sm font-semibold text-forest-900 mb-4">
                   Typical Weekday Load Profile
                 </h2>
-                <LoadCurveChart data={loadCurve} height={220} />
+                <StackedAreaChart
+                  applianceCurves={applianceCurves}
+                  scales={scales}
+                  height={260}
+                />
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs font-semibold text-forest-900 uppercase tracking-wide">
+                      Appliance Mix
+                    </h3>
+                    <span className="text-xs text-slate-500">Toggle off or rescale (0–200%)</span>
+                  </div>
+                  <AppliancePanel
+                    scales={scales}
+                    enabled={enabled}
+                    onToggle={handleToggle}
+                    onScaleChange={handleScaleChange}
+                  />
+                </div>
               </div>
 
-              {/* Shape metrics */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <MetricCard
                   label="Load Factor"
-                  value={metrics.load_factor != null ? fmtPct(metrics.load_factor / 100, 0) : '—'}
-                  hint="Avg ÷ peak — higher is better"
-                  color="text-emerald-600"
+                  value={metrics.load_factor != null ? fmtPct(metrics.load_factor, 0) : '—'}
+                  hint="Avg ÷ peak"
+                  color="text-forest-700"
+                  testId="metric-load-factor"
                 />
                 <MetricCard
                   label="Peak Demand"
                   value={metrics.peak_kw != null ? fmtNumber(metrics.peak_kw, 1) : '—'}
                   unit="kW"
                   color="text-amber-600"
+                  testId="metric-peak-kw"
                 />
                 <MetricCard
                   label="Peak Coincidence"
-                  value={
-                    metrics.peak_coincidence != null
-                      ? fmtPct(metrics.peak_coincidence / 100, 0)
-                      : '—'
-                  }
-                  hint="Load in peak TOU window"
+                  value={metrics.peak_coincidence != null ? fmtPct(metrics.peak_coincidence, 0) : '—'}
+                  hint="Load in peak window"
                   color="text-red-600"
+                  testId="metric-peak-coincidence"
                 />
                 <MetricCard
                   label="Annual Consumption"
-                  value={
-                    metrics.annual_kwh != null
-                      ? fmtNumber(metrics.annual_kwh / 1000, 1)
-                      : '—'
-                  }
+                  value={metrics.annual_kwh != null ? fmtNumber(metrics.annual_kwh / 1000, 1) : '—'}
                   unit="MWh"
-                  color="text-indigo-700"
+                  color="text-forest-800"
+                  testId="metric-annual-kwh"
                 />
               </div>
             </div>
 
-            {/* Right: Cost stack */}
             <div className="lg:col-span-2 space-y-4">
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-slate-700 mb-5">Annual Cost Breakdown</h2>
+                <h2 className="text-sm font-semibold text-forest-900 mb-5">Annual Cost Breakdown</h2>
                 <CostStackChart costStack={costStack} />
               </div>
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-                <h2 className="text-sm font-semibold text-slate-700 mb-4">Cost Detail</h2>
+                <h2 className="text-sm font-semibold text-forest-900 mb-4">Cost Detail</h2>
                 <CostBreakdownTable costStack={costStack} />
               </div>
             </div>
           </div>
 
-          {/* Action bar */}
-          <div className="mt-8 flex items-center justify-between border-t border-slate-200 pt-6">
-            <p className="text-sm text-slate-500">
-              Ready to explore savings opportunities?
-            </p>
+          <div className="mt-8 flex items-center justify-between border-t border-forest-100 pt-6">
+            <p className="text-sm text-slate-600">Ready to explore savings opportunities?</p>
             <button
               onClick={() => navigate(`/clients/${id}/scenarios`)}
-              className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg px-6 py-2.5 text-sm transition-colors"
+              data-testid="build-scenarios-btn"
+              className="inline-flex items-center gap-2 bg-lime-500 hover:bg-lime-600 text-forest-900 font-semibold rounded-lg px-6 py-2.5 text-sm transition-colors"
             >
               Build Scenarios
               <ArrowRight size={16} />

@@ -28,8 +28,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, status
+from dotenv import load_dotenv
+
+# Load .env (e.g., ANTHROPIC_API_KEY) before importing modules that read env vars
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, status, Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 import data_store
 from models import (
@@ -52,6 +58,7 @@ from interval_parser import (
 )
 from baseline_engine import compute_baseline
 from scenario_engine import SCENARIO_LIBRARY, run_scenarios
+from scenario_claude import generate_scenarios, fallback_scenarios, _has_api_key
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -189,7 +196,56 @@ app.add_middleware(
 @app.on_event("startup")
 def startup_event():
     data_store.load_from_disk()
+    if not data_store.clients:
+        logger.info("No clients found — seeding demo client")
+        data_store.seed_demo_data()
     logger.info("Data store loaded on startup")
+    # Pre-warm Claude scenarios for the demo client in a background thread
+    # so the first user gets cached results without waiting 30s+.
+    _prewarm_demo_scenarios()
+
+
+def _prewarm_demo_scenarios() -> None:
+    """If the demo client exists and has no cached Claude scenarios yet,
+    kick off generation in a background thread."""
+    import threading
+
+    demo_id = "client-demo-001"
+    cached_key = f"claude_default_{demo_id}"
+    if demo_id not in data_store.clients or cached_key in data_store.client_scenarios:
+        return
+    if not _has_api_key():
+        return
+
+    def _bg() -> None:
+        try:
+            logger.info("Pre-warming Claude scenarios for %s", demo_id)
+            client = data_store.clients[demo_id]
+            tariff = _get_client_tariff(demo_id)
+            if tariff is None and data_store.tariffs:
+                tariff = Tariff(**next(iter(data_store.tariffs.values())))
+            if tariff is None:
+                return
+            load_curve, annual_kwh = _get_client_load_curve(demo_id, client)
+            baseline = compute_baseline(load_curve, tariff, annual_kwh)
+            result = generate_scenarios(
+                client=client,
+                baseline=baseline,
+                tariff=tariff,
+                annual_kwh=annual_kwh,
+                extra_instruction=None,
+            )
+            data_store.client_scenarios[cached_key] = {
+                "scenarios": result.get("scenarios", []),
+                "source": result.get("source", "claude"),
+            }
+            data_store.save_to_disk()
+            logger.info("Pre-warmed %d Claude scenarios for %s", len(result.get("scenarios", [])), demo_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Demo scenario pre-warm failed: %s", exc)
+
+    t = threading.Thread(target=_bg, daemon=True)
+    t.start()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -333,6 +389,72 @@ def create_tariff(body: Tariff):
     return body.model_dump()
 
 
+# ── Appliance split (for stacked-area chart) ──────────────────────────────────
+
+# Site-type → appliance fraction weights (must sum to 1.0)
+APPLIANCE_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "cafe": {
+        "Fridges": 0.22,
+        "Espresso": 0.12,
+        "Ovens": 0.18,
+        "HVAC": 0.20,
+        "Lighting": 0.08,
+        "Dishwasher": 0.08,
+        "Hot Water": 0.07,
+        "Misc": 0.05,
+    },
+    "office": {
+        "Fridges": 0.06,
+        "Espresso": 0.04,
+        "Ovens": 0.02,
+        "HVAC": 0.45,
+        "Lighting": 0.20,
+        "Dishwasher": 0.02,
+        "Hot Water": 0.05,
+        "Misc": 0.16,
+    },
+    "retail": {
+        "Fridges": 0.20,
+        "Espresso": 0.03,
+        "Ovens": 0.05,
+        "HVAC": 0.30,
+        "Lighting": 0.25,
+        "Dishwasher": 0.02,
+        "Hot Water": 0.03,
+        "Misc": 0.12,
+    },
+    "industrial": {
+        "Fridges": 0.05,
+        "Espresso": 0.01,
+        "Ovens": 0.05,
+        "HVAC": 0.15,
+        "Lighting": 0.10,
+        "Dishwasher": 0.02,
+        "Hot Water": 0.05,
+        "Misc": 0.57,
+    },
+    "hospitality": {
+        "Fridges": 0.18,
+        "Espresso": 0.06,
+        "Ovens": 0.22,
+        "HVAC": 0.22,
+        "Lighting": 0.10,
+        "Dishwasher": 0.09,
+        "Hot Water": 0.08,
+        "Misc": 0.05,
+    },
+}
+
+
+def _split_appliance_curves(load_curve: List[float], site_type: str) -> Dict[str, List[float]]:
+    """Split a 48-bucket load curve into per-appliance contributions."""
+    weights = APPLIANCE_WEIGHTS.get(site_type.lower(), APPLIANCE_WEIGHTS["cafe"])
+    out: Dict[str, List[float]] = {}
+    for name, w in weights.items():
+        out[name] = [round(load_curve[b] * w, 4) for b in range(len(load_curve))]
+    return out
+
+
 # ── Baseline ──────────────────────────────────────────────────────────────────
 
 def _get_client_load_curve(client_id: str, client: dict) -> tuple[List[float], float]:
@@ -387,6 +509,9 @@ def get_baseline(client_id: str):
 
     result = compute_baseline(load_curve, tariff, annual_kwh)
 
+    # Appliance-split curves (frontend stacked-area chart)
+    result["appliance_curves"] = _split_appliance_curves(load_curve, client.get("site_type", "office"))
+
     # Update client annual_cost
     client["annual_cost"] = result["cost_stack"]["total_annual"]
     if not client.get("annual_kwh"):
@@ -437,6 +562,79 @@ def run_client_scenarios(client_id: str, body: ScenarioRunRequest):
     data_store.save_to_disk()
 
     return result
+
+
+# ── Claude-generated dynamic scenarios ────────────────────────────────────────
+
+class GenerateScenariosRequest(BaseModel):
+    extra_instruction: Optional[str] = None
+
+
+@app.post("/api/clients/{client_id}/scenarios/generate")
+def generate_client_scenarios(client_id: str, body: GenerateScenariosRequest, response: Response):
+    """
+    Claude generates a ranked list of bespoke load-shift scenarios for this
+    client. Falls back to the legacy 4-scenario engine if ANTHROPIC_API_KEY
+    is missing.
+    """
+    client = data_store.clients.get(client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    tariff = _get_client_tariff(client_id)
+    if tariff is None:
+        if data_store.tariffs:
+            first_tariff_data = next(iter(data_store.tariffs.values()))
+            tariff = Tariff(**first_tariff_data)
+        else:
+            raise HTTPException(status_code=404, detail="No tariff assigned to this client")
+
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+    baseline = compute_baseline(load_curve, tariff, annual_kwh)
+
+    # For the demo client without an extra_instruction, serve cached scenarios
+    # if available so the page is instant on repeat visits.
+    cached_key = f"claude_default_{client_id}"
+    if not body.extra_instruction:
+        cached = data_store.client_scenarios.get(cached_key)
+        if cached:
+            response.headers["X-Scenario-Source"] = "claude-cached"
+            result = dict(cached)
+            result["baseline_curve"] = [round(v, 4) for v in load_curve]
+            return result
+
+    if not _has_api_key():
+        response.headers["X-Scenario-Source"] = "fallback"
+        logger.warning("ANTHROPIC_API_KEY missing — using fallback scenarios")
+        result = fallback_scenarios(load_curve, tariff, annual_kwh)
+        result["baseline_curve"] = [round(v, 4) for v in load_curve]
+        return result
+
+    try:
+        result = generate_scenarios(
+            client=client,
+            baseline=baseline,
+            tariff=tariff,
+            annual_kwh=annual_kwh,
+            extra_instruction=body.extra_instruction,
+        )
+        response.headers["X-Scenario-Source"] = result.get("source", "claude")
+        result["baseline_curve"] = [round(v, 4) for v in load_curve]
+        # Cache only the no-instruction default response
+        if not body.extra_instruction:
+            data_store.client_scenarios[cached_key] = {
+                "scenarios": result.get("scenarios", []),
+                "source": result.get("source", "claude"),
+            }
+            data_store.save_to_disk()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Claude scenario generation failed — falling back: %s", exc)
+        response.headers["X-Scenario-Source"] = "fallback"
+        response.headers["X-Scenario-Error"] = str(exc)[:200]
+        result = fallback_scenarios(load_curve, tariff, annual_kwh)
+        result["baseline_curve"] = [round(v, 4) for v in load_curve]
+        return result
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
