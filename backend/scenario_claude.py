@@ -305,6 +305,8 @@ def generate_scenarios(
         parsed = _try_parse_json(final_text)
         if parsed and isinstance(parsed.get("scenarios"), list):
             scenarios = parsed["scenarios"]
+            # Drop net-cost scenarios (broker UI only wants savings)
+            scenarios = [s for s in scenarios if ((s.get("savings") or {}).get("total_high", 0) > 0)]
             # Sort by total_low desc and re-rank
             scenarios.sort(key=lambda s: (s.get("savings") or {}).get("total_low", 0), reverse=True)
             for i, s in enumerate(scenarios, start=1):

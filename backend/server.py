@@ -620,11 +620,12 @@ def generate_client_scenarios(client_id: str, body: GenerateScenariosRequest, re
         )
         response.headers["X-Scenario-Source"] = result.get("source", "claude")
         result["baseline_curve"] = [round(v, 4) for v in load_curve]
-        # Cache only the no-instruction default response
-        if not body.extra_instruction:
+        # Cache only successful Claude responses for the no-instruction default
+        src = result.get("source", "")
+        if not body.extra_instruction and src.startswith("claude") and result.get("scenarios"):
             data_store.client_scenarios[cached_key] = {
                 "scenarios": result.get("scenarios", []),
-                "source": result.get("source", "claude"),
+                "source": src,
             }
             data_store.save_to_disk()
         return result
