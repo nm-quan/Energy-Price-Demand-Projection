@@ -18,7 +18,7 @@ function defaultScales() {
   return o;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ onNavigate = () => {} }) {
   const [meters, setMeters] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
   const [scales, setScales] = useState(defaultScales);
@@ -117,6 +117,8 @@ export default function Dashboard() {
         selectedIds={selectedIds}
         onSelect={selectMeter}
         onSelectAll={selectAll}
+        page="dashboard"
+        onNavigate={onNavigate}
       />
 
       <main className="flex-1 min-w-0 flex flex-col">

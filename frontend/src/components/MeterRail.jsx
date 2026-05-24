@@ -1,5 +1,6 @@
 import React from "react";
 import { fmtNumber } from "../lib/api";
+import PageSwitcher from "./PageSwitcher";
 
 function Sparkline({ values, color = "#5EEAD4" }) {
   if (!values || !values.length) return null;
@@ -63,11 +64,15 @@ function MeterCard({ meter, selected, onSelect }) {
   );
 }
 
-export default function MeterRail({ meters, selectedIds, onSelect, onSelectAll }) {
+export default function MeterRail({ meters, selectedIds, onSelect, onSelectAll, page = "dashboard", onNavigate = () => {} }) {
   const allSelected = meters.length > 0 && selectedIds.length === meters.length;
   return (
     <aside data-testid="meter-rail" className="hidden lg:flex w-72 shrink-0 flex-col bg-forest text-white">
-      <div className="px-5 pt-6 pb-3">
+      <div className="px-3 pt-5 pb-3">
+        <PageSwitcher page={page} onNavigate={onNavigate} />
+      </div>
+
+      <div className="px-5 pt-1 pb-3">
         <div className="text-[10px] uppercase tracking-[0.14em] font-semibold text-mint/70">
           Portfolio
         </div>

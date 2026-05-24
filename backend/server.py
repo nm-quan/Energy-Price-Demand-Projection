@@ -37,6 +37,7 @@ from seed_data import (
     meter_baseline_shape,
 )
 from cost_engine import annual_cost, shape_stats
+from scenario_chat import ChatRequest, ChatResponse, run_chat
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -253,6 +254,24 @@ async def rank_plans(req: RankRequest):
         "achievable_saving": achievable_saving,
         "agg_zone": agg_zone,
     }
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    m = _meter(req.meter_id)
+    site_context = {
+        "nickname": m["nickname"],
+        "nmi": m["nmi"],
+        "state": m["state"],
+        "zone_name": m["zone_name"],
+        "annual_kwh": m["annual_kwh"],
+        "current_plan_label": m["current_plan_label"],
+    }
+    try:
+        return run_chat(req, site_context)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("chat failed")
+        raise HTTPException(500, f"Claude call failed: {exc}")
 
 
 @app.post("/api/refresh-cdr")
