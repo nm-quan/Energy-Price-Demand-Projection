@@ -98,9 +98,15 @@ COMMIT_TOOL: Dict[str, Any] = {
 
 SIMULATE_SYSTEM = """You are an energy analyst. Given a site's load profile, pick ONE appliance to shift for cost savings.
 
-For TOU tariffs, shift load OUT of peak buckets 30–42 (3pm–9pm) to off-peak buckets 0–16 (midnight–8am).
-Use shift_window with from_scale 0.5–0.7 for a meaningful result.
-Use the exact appliance name as given in the user message."""
+You will receive per-appliance load data showing kWh in each window and what % falls in the TOU peak (3–9pm, buckets 30–42).
+Rules:
+- ONLY shift an appliance that has actual load in the TOU peak window (>10% in peak).
+- Pick the appliance with the MOST kWh in the TOU peak window.
+- Set from_window to the actual hours that appliance runs during peak (e.g. [30, 42]).
+- Set to_window to off-peak hours: [0, 16] (midnight–8am).
+- Use from_scale 0.5–0.7.
+- If no appliance has >10% load in peak, pick the one with the highest % and shift it from its actual peak hours.
+- Use the exact appliance name as given in the user message."""
 
 COMMIT_SYSTEM = """You are an energy analyst writing a scenario summary. Be concise and specific.
 
@@ -236,27 +242,58 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
 
 # ── Core generation ──────────────────────────────────────────────────────────
 
+def _appliance_load_summary(name: str, curve: List[float]) -> str:
+    """Return one-line load breakdown for an appliance: kWh by window + % in TOU peak."""
+    def kwh(buckets):
+        return sum((curve[b] if b < len(curve) else 0.0) * 0.5 for b in buckets)
+
+    morn  = kwh(range(0, 16))    # midnight–8am (off-peak)
+    mid   = kwh(range(16, 30))   # 8am–3pm
+    peak  = kwh(range(30, 42))   # 3pm–9pm (TOU peak)
+    eve   = kwh(range(42, 48))   # 9pm–midnight
+    total = morn + mid + peak + eve
+    pct   = (peak / total * 100) if total > 0 else 0
+    # Find actual peak bucket (hour of max kW)
+    peak_bucket = max(range(len(curve)), key=lambda b: curve[b]) if curve else 0
+    peak_hour   = f"{peak_bucket // 2:02d}:{(peak_bucket % 2) * 30:02d}"
+    return (
+        f"  {name:<12} off-pk {morn:.1f} kWh · mid {mid:.1f} kWh · "
+        f"TOU-peak(3-9pm) {peak:.1f} kWh ({pct:.0f}%) · "
+        f"actual-peak-at {peak_hour}"
+    )
+
+
 def _build_user_message(
     client: Dict[str, Any],
     shape: Dict[str, Any],
     tariff: Tariff,
     annual_kwh: float,
+    appliance_curves: Dict[str, List[float]],
     appliance_share: Dict[str, float],
     scenario_idx: int,
     total_count: int,
     extra_instruction: Optional[str],
 ) -> str:
     rates = tariff.energy_rates
-    top = sorted(appliance_share.items(), key=lambda kv: -kv[1])[:4]
-    appliance_str = ", ".join(f"{k} {v*100:.0f}%" for k, v in top)
+    # Sort by TOU-peak kWh descending so agent sees best candidate first
+    def tou_peak_kwh(name):
+        c = appliance_curves.get(name, [])
+        return sum((c[b] if b < len(c) else 0.0) * 0.5 for b in range(30, 42))
+
+    all_appliances = list(appliance_share.keys())
+    sorted_by_peak = sorted(all_appliances, key=tou_peak_kwh, reverse=True)
+
+    load_lines = "\n".join(
+        _appliance_load_summary(n, appliance_curves.get(n, [0.0] * 48))
+        for n in sorted_by_peak
+    )
     msg = (
         f"Site: {client.get('name')}, {client.get('site_type')}\n"
-        f"Annual: {annual_kwh:.0f} kWh · Peak: {shape.get('peak_kw', 0):.1f} kW\n"
-        f"Peak coincidence (3–9pm): {(shape.get('peak_coincidence') or 0)*100:.0f}%\n"
-        f"Top appliances: {appliance_str}\n"
-        f"Appliance names (use exactly): {', '.join(appliance_share.keys())}\n"
+        f"Annual: {annual_kwh:.0f} kWh · Peak demand: {shape.get('peak_kw', 0):.1f} kW\n"
         f"Tariff: {tariff.retailer} {tariff.plan_name} — peak ${rates.peak or 0:.3f}, off-peak ${rates.offpeak or 0:.3f}/kWh\n"
-        f"\nScenario {scenario_idx} of {total_count}."
+        f"\nAppliance load (kWh/day), sorted by TOU-peak exposure:\n{load_lines}\n"
+        f"\nAppliance names (use exactly): {', '.join(all_appliances)}\n"
+        f"Scenario {scenario_idx} of {total_count}."
     )
     if extra_instruction:
         msg += f"\nFocus: {extra_instruction}"
@@ -314,7 +351,7 @@ def _generate_one(
         "working_curves": {k: list(v) for k, v in appliance_curves.items()},
     }
     user_msg = _build_user_message(
-        client, shape, tariff, annual_kwh, appliance_share,
+        client, shape, tariff, annual_kwh, appliance_curves, appliance_share,
         scenario_idx, total_count, extra_instruction,
     )
 
