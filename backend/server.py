@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # In-memory job store for async scenario generation
 JOBS: Dict[str, Dict[str, Any]] = {}
@@ -34,8 +34,11 @@ from interval_parser import (
     build_typical_weekday,
     compute_interval_stats,
 )
+import anthropic as _anthropic
+import os
+
 from baseline_engine import compute_baseline
-from scenario_claude import generate_scenarios, _has_api_key, compute_retailer_comparison
+from scenario_claude import generate_scenarios, generate_single, _has_api_key, compute_retailer_comparison
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -662,6 +665,124 @@ def clear_client_scenarios(client_id: str):
         data_store.scenarios.pop(sid, None)
     data_store.save_to_disk()
     return {"deleted": len(ids)}
+
+
+# ── Chat ─────────────────────────────────────────────────────────────────────
+
+class ChatMsg(BaseModel):
+    role: str
+    content: str
+
+class ClientChatRequest(BaseModel):
+    messages: List[ChatMsg] = Field(default_factory=list)
+    user_message: str
+
+_CHAT_GEN_TOOL = {
+    "name": "generate_scenario",
+    "description": "Generate a load-shift energy saving scenario for this site. Call when the user asks for a plan, recommendation, or wants to see what savings are possible.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "instruction": {"type": "string", "description": "Brief focus, e.g. 'cheapest option', 'no upfront cost'"},
+        },
+    },
+}
+
+@app.post("/api/clients/{client_id}/chat")
+def client_chat(client_id: str, body: ClientChatRequest):
+    client = data_store.clients.get(client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not _has_api_key():
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    tariff = _resolve_tariff(client_id)
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+    baseline = compute_baseline(load_curve, tariff, annual_kwh)
+    site_type = client.get("site_type", "cafe")
+    appliance_curves = _split_appliance_curves(load_curve, site_type)
+
+    total_kwh = sum(load_curve) * 0.5
+    appliance_share = {
+        name: (sum(curve) * 0.5) / total_kwh if total_kwh > 0 else 0.0
+        for name, curve in appliance_curves.items()
+    }
+    top = sorted(appliance_share.items(), key=lambda kv: -kv[1])[:4]
+    appliance_str = ", ".join(f"{k} {v*100:.0f}%" for k, v in top)
+    rates = tariff.energy_rates
+
+    system = (
+        f"You are an energy advisor for {client.get('name')}, a {site_type}.\n\n"
+        f"Site data:\n"
+        f"- Annual usage: {annual_kwh:.0f} kWh, annual bill: ${baseline.get('annual_cost', 0):,.0f}\n"
+        f"- Peak demand: {baseline.get('peak_kw', 0):.1f} kW\n"
+        f"- Tariff: {tariff.retailer} {tariff.plan_name} — peak ${rates.peak:.3f}, off-peak ${rates.offpeak:.3f}/kWh\n"
+        f"- Top energy users: {appliance_str}\n\n"
+        f"Help the user understand their energy costs and how load shifting can unlock better contracts.\n"
+        f"Load shifting = moving usage from peak hours (3–9pm) to off-peak (midnight–8am) to reduce peak charges and qualify for cheaper retailer plans.\n"
+        f"When the user asks for a plan, scenario, or says 'do it' / 'show me', call generate_scenario.\n"
+        f"Be concise — 2–3 sentences max. Be specific to this site."
+    )
+
+    sdk_messages = [
+        {"role": m.role, "content": m.content}
+        for m in body.messages
+        if m.role in ("user", "assistant")
+    ]
+    sdk_messages.append({"role": "user", "content": body.user_message})
+
+    ai = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    resp = ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        system=system,
+        messages=sdk_messages,
+        tools=[_CHAT_GEN_TOOL],
+        max_tokens=512,
+    )
+
+    text_blocks = [b for b in resp.content if getattr(b, "type", None) == "text"]
+    tu_blocks   = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+    reply = "\n".join(b.text for b in text_blocks if b.text).strip()
+
+    generated_scenario = None
+    if tu_blocks and tu_blocks[0].name == "generate_scenario":
+        instruction = (tu_blocks[0].input or {}).get("instruction") or body.user_message
+        try:
+            baseline["load_curve"] = load_curve
+            result = generate_single(
+                client=client,
+                baseline=baseline,
+                appliance_curves=appliance_curves,
+                tariff=tariff,
+                annual_kwh=annual_kwh,
+                extra_instruction=instruction,
+            )
+            if result and result.get("shifted_curve"):
+                sid = f"scn-{uuid.uuid4().hex[:8]}"
+                record = {
+                    "id": sid,
+                    "client_id": client_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "baseline_curve": [round(v, 4) for v in load_curve],
+                    "baseline_appliance_curves": appliance_curves,
+                    "from_chat": True,
+                    **result,
+                }
+                data_store.scenarios[sid] = record
+                data_store.save_to_disk()
+                generated_scenario = record
+                savings = result.get("savings_annual_low", 0)
+                retailer = result.get("retailer_winner", "a cheaper retailer")
+                reply = (
+                    f"Here's a plan: {result.get('name', 'Load shift scenario')}. "
+                    f"By shifting load off-peak you could save around ${savings:,.0f}/yr "
+                    f"and qualify for better rates with {retailer}."
+                )
+        except Exception:
+            logger.exception("Chat scenario generation failed for client %s", client_id)
+            reply = "I tried to generate a plan but hit an error. Try the Generate button on the Scenarios tab."
+
+    return {"reply": reply or "Got it.", "scenario": generated_scenario}
 
 
 # ── Reports ──────────────────────────────────────────────────────────────────
