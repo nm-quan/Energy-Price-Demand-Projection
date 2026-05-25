@@ -15,6 +15,8 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # In-memory job store for async scenario generation
@@ -591,3 +593,18 @@ def delete_report(report_id: str):
     data_store.reports.pop(report_id, None)
     data_store.save_to_disk()
     return {"deleted": True}
+
+
+# ── Static frontend (production) ─────────────────────────────────────────────
+
+import os as _os
+
+_FRONTEND_BUILD = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "build")
+
+if _os.path.isdir(_FRONTEND_BUILD):
+    app.mount("/static", StaticFiles(directory=_os.path.join(_FRONTEND_BUILD, "static")), name="static")
+
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        index = _os.path.join(_FRONTEND_BUILD, "index.html")
+        return FileResponse(index)
