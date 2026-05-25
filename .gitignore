@@ -36,6 +36,18 @@ desktop.ini
 
 .claude/
 
+# Replit
+.replit
+replit.nix
+
+# Emergent / agent artifacts
+.emergent/
+memory/
+test_reports/
+
+# Git config (should not be committed)
+.gitconfig
+
 .env
 .env.*
 *.env
