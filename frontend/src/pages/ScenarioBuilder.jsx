@@ -300,10 +300,20 @@ export default function ScenarioBuilder() {
         const elapsed = Math.floor((Date.now() - start) / 1000);
         const jobRes  = await getGenerationJob(jobId);
         const job     = jobRes.data;
+
+        // Show partial results as they arrive, deduplicating by id
+        const partial = job.scenarios || [];
+        if (partial.length > 0) {
+          setScenarios((cur) => {
+            const existingIds = new Set(cur.map((s) => s.id));
+            const newOnes = partial.filter((s) => !existingIds.has(s.id));
+            if (newOnes.length === 0) return cur;
+            if (newOnes[0]) setExpandedId(newOnes[0].id);
+            return [...newOnes, ...cur];
+          });
+        }
+
         if (job.status === 'done') {
-          const newScenarios = job.scenarios || [];
-          setScenarios((cur) => [...newScenarios, ...cur]);
-          if (newScenarios[0]) setExpandedId(newScenarios[0].id);
           setExtraInstruction('');
           setGenerating(false);
           setProgress('');
@@ -312,8 +322,9 @@ export default function ScenarioBuilder() {
           setGenerating(false);
           setProgress('');
         } else {
-          setProgress(`Generating ${count} scenario${count > 1 ? 's' : ''} in parallel · ${elapsed}s`);
-          setTimeout(poll, 2500);
+          const completed = partial.length;
+          setProgress(`${completed} of ${count} scenario${count > 1 ? 's' : ''} ready · ${elapsed}s`);
+          setTimeout(poll, 1000);
         }
       };
       setTimeout(poll, 1500);
