@@ -135,7 +135,7 @@ function ReportDocument({ report, innerRef }) {
         {scenarios.map((s, i) => (
           <section key={s.id || i}>
             <h2 className="text-[11px] uppercase tracking-widest text-ink-mute mb-3">
-              Scenario {i + 1}
+              Proposed Plan {i + 1}
             </h2>
             <div className="border border-line rounded-2xl p-5 bg-cream-50">
               <div className="flex items-baseline justify-between mb-3 gap-4">
