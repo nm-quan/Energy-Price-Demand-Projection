@@ -142,7 +142,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
           </button>
 
           <div className="flex-1 min-w-0">
-            <span className="text-[10px] uppercase tracking-wider text-ink-mute">#{scenario.rank}</span>
+            <span className="text-[10px] uppercase tracking-wider text-ink-mute">Proposed Plan {scenario.rank}</span>
             <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
           </div>
 
