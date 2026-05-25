@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Check, ChevronDown, ChevronUp,
-  Layers, Store,
+  Layers, Store, Send, MessageCircle,
 } from 'lucide-react';
 import {
-  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, fmtCurrency, fmtNumber,
 } from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 
@@ -144,6 +144,13 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
           <div className="flex-1 min-w-0">
             <span className="text-[10px] uppercase tracking-wider text-ink-mute">Proposed Plan {scenario.rank}</span>
             <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
+            {scenario.appliance_changes?.[0] && (
+              <p className="text-xs text-ink-soft mt-0.5">
+                Shift <span className="font-medium text-forest-800">{scenario.appliance_changes[0].appliance}</span> off-peak
+                {scenario.retailer_winner && <> → <span className="font-medium text-violet">{scenario.retailer_winner}</span></>}
+                {' → '}save ~<span className="font-medium text-forest-700 tabnum">{fmtCurrency(scenario.savings_annual_low)}/yr</span>
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-3 flex-shrink-0">
@@ -251,11 +258,110 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
   );
 }
 
+// ── Chat view ─────────────────────────────────────────────────────────────────
+function ChatView({ clientId, onScenarioGenerated }) {
+  const [messages, setMessages] = useState([
+    { role: 'assistant', content: "Hi! I can explain your energy costs, what to shift, and which retailer gives the best deal. Ask me anything — or say \"generate a plan\" and I'll build one." },
+  ]);
+  const [input, setInput]   = useState('');
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    setInput('');
+    const history = messages.map(({ role, content }) => ({ role, content }));
+    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    setLoading(true);
+    try {
+      const res = await chatWithClient(clientId, history, text);
+      const { reply, scenario } = res.data;
+      setMessages(prev => [...prev, { role: 'assistant', content: reply, scenario }]);
+      if (scenario) onScenarioGenerated(scenario);
+    } catch {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Something went wrong. Please try again.' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const CHAT_HINTS = ['What uses the most power?', 'How does load shifting work?', 'Which retailer is cheapest?', 'Generate a plan'];
+
+  return (
+    <div className="bg-forest-800 rounded-2xl overflow-hidden flex flex-col" style={{ height: '560px' }}>
+      <div className="flex-1 overflow-y-auto p-5 space-y-3">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[82%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+              m.role === 'user' ? 'bg-violet text-white' : 'bg-forest-700 text-forest-100'
+            }`}>
+              {m.content}
+              {m.scenario && (
+                <div className="mt-2.5 bg-forest-900/60 rounded-xl p-3 border border-forest-600">
+                  <p className="text-[10px] uppercase tracking-wider text-forest-400 mb-1">Plan generated</p>
+                  <p className="text-white font-semibold text-sm">{m.scenario.name}</p>
+                  <p className="text-lime font-medium text-sm tabnum mt-0.5">
+                    ~{fmtCurrency(m.scenario.savings_annual_low)}/yr → {m.scenario.retailer_winner}
+                  </p>
+                  <p className="text-forest-300 text-[11px] mt-1">Saved to Scenarios tab</p>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-forest-700 rounded-2xl px-4 py-3">
+              <Loader size={14} className="animate-spin text-forest-300" />
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="border-t border-forest-700 px-4 pt-3 pb-2 flex flex-wrap gap-2">
+        {CHAT_HINTS.map(h => (
+          <button
+            key={h}
+            onClick={() => { setInput(h); }}
+            className="text-[11px] px-3 py-1 rounded-full border border-forest-600 text-forest-300 hover:border-lime hover:text-lime transition-colors"
+          >
+            {h}
+          </button>
+        ))}
+      </div>
+
+      <div className="px-4 pb-4 flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Ask about this site's energy…"
+          className="flex-1 bg-forest-700 border border-forest-600 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-forest-400 focus:outline-none focus:border-lime"
+        />
+        <button
+          onClick={send}
+          disabled={loading || !input.trim()}
+          className="btn-violet flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center disabled:opacity-40"
+        >
+          <Send size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function ScenarioBuilder() {
   const { id } = useParams();
   const navigate = useNavigate();
 
+  const [activeTab,        setActiveTab]        = useState('scenarios');
   const [client,           setClient]           = useState(null);
   const [scenarios,        setScenarios]        = useState([]);
   const [count,            setCount]            = useState(3);
@@ -341,6 +447,15 @@ export default function ScenarioBuilder() {
     setSelectedIds((cur) => { const next = new Set(cur); next.delete(sid); return next; });
   };
 
+  const handleScenarioFromChat = (scenario) => {
+    setScenarios(prev => {
+      const existingIds = new Set(prev.map(s => s.id));
+      if (existingIds.has(scenario.id)) return prev;
+      return [scenario, ...prev];
+    });
+    setExpandedId(scenario.id);
+  };
+
   const handleClearAll = async () => {
     if (!window.confirm('Delete all scenarios for this client?')) return;
     await clearClientScenarios(id);
@@ -388,17 +503,45 @@ export default function ScenarioBuilder() {
 
       <div className="flex items-end justify-between mb-8 gap-6">
         <div>
-          <h1 className="font-display text-5xl text-forest-900 leading-none">Load-shift scenarios.</h1>
+          <h1 className="font-display text-5xl text-forest-900 leading-none">
+            {activeTab === 'scenarios' ? 'Load-shift scenarios.' : 'Chat with your data.'}
+          </h1>
           <p className="text-sm text-ink-soft mt-3 max-w-xl">
-            Claude analyses the site, simulates appliance-level changes, compares retailers, and saves each scenario.
+            {activeTab === 'scenarios'
+              ? 'Claude shifts appliance load off-peak, compares retailers, and shows you where to save.'
+              : 'Ask about energy costs, what to shift, which retailer is best — or say "generate a plan".'}
           </p>
+        </div>
+        <div className="flex gap-1 bg-forest-100 rounded-full p-1 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab('scenarios')}
+            className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'scenarios' ? 'bg-white text-forest-900 shadow-sm' : 'text-ink-mute hover:text-forest-900'
+            }`}
+          >
+            <Sparkles size={13} />Scenarios
+          </button>
+          <button
+            onClick={() => setActiveTab('chat')}
+            className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'chat' ? 'bg-white text-forest-900 shadow-sm' : 'text-ink-mute hover:text-forest-900'
+            }`}
+          >
+            <MessageCircle size={13} />Chat
+          </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
 
-        {/* Main column */}
-        <div className="lg:col-span-5 space-y-5">
+        {activeTab === 'chat' && (
+          <div className="lg:col-span-7">
+            <ChatView clientId={id} onScenarioGenerated={handleScenarioFromChat} />
+          </div>
+        )}
+
+        {/* Main column — scenarios tab */}
+        <div className={`lg:col-span-5 space-y-5 ${activeTab === 'chat' ? 'hidden' : ''}`}>
 
           {/* Generator card */}
           <div className="bg-forest-800 text-white rounded-2xl p-6 shadow-card">
@@ -546,7 +689,7 @@ export default function ScenarioBuilder() {
         </div>
 
         {/* Side rail — report bundler only */}
-        <aside className="lg:col-span-2">
+        <aside className={`lg:col-span-2 ${activeTab === 'chat' ? 'hidden' : ''}`}>
           {scenarios.length > 0 && (
             <div className="bg-violet/10 border border-violet/30 rounded-2xl p-4">
               <h3 className="font-display text-lg text-forest-900 mb-1">Bundle into a report</h3>
