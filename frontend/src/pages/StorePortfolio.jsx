@@ -26,26 +26,29 @@ function SiteTypeBadge({ type }) {
 function StoreCard({ store, selected, onToggle, onDelete }) {
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onToggle}
-      onKeyDown={(e) => e.key === 'Enter' && onToggle()}
       data-testid={`store-card-${store.id}`}
-      className={`group relative bg-cream-50 border rounded-2xl p-5 cursor-pointer transition-all select-none focus:outline-none ${
+      className={`group relative bg-cream-50 border rounded-2xl p-5 transition-all ${
         selected
           ? 'border-violet ring-2 ring-violet/30 bg-violet/5'
-          : 'border-line hover:border-forest-300 hover:shadow-card'
+          : 'border-line hover:shadow-card'
       }`}
     >
-      {/* Selection tick */}
-      <div className={`absolute top-4 right-4 w-6 h-6 rounded-md border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-        selected ? 'bg-violet border-violet text-white' : 'bg-cream-50 border-line group-hover:border-violet/60'
-      }`}>
-        {selected && <Check size={13} strokeWidth={3} />}
-      </div>
+      {/* Select button */}
+      <button
+        type="button"
+        onClick={onToggle}
+        data-testid={`select-store-${store.id}`}
+        className={`absolute top-4 right-4 inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-all ${
+          selected
+            ? 'bg-violet border-violet text-white'
+            : 'bg-cream-50 border-line text-ink-mute hover:border-violet hover:text-violet'
+        }`}
+      >
+        {selected ? <><Check size={11} strokeWidth={3} />Selected</> : 'Select'}
+      </button>
 
       {/* Store name + badge */}
-      <div className="pr-8 mb-3">
+      <div className="pr-20 mb-3">
         <div className="flex items-center gap-2 mb-1">
           <SiteTypeBadge type={store.site_type} />
         </div>
@@ -83,17 +86,15 @@ function StoreCard({ store, selected, onToggle, onDelete }) {
         )}
       </div>
 
-      {/* Delete button (appears on hover, not when selected) */}
-      {!selected && (
-        <button
-          type="button"
-          data-testid={`delete-store-${store.id}`}
-          onClick={(e) => { e.stopPropagation(); onDelete(store.id); }}
-          className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-ink-mute hover:text-red-600 p-1 rounded"
-        >
-          <Trash2 size={13} />
-        </button>
-      )}
+      {/* Delete button */}
+      <button
+        type="button"
+        data-testid={`delete-store-${store.id}`}
+        onClick={() => onDelete(store.id)}
+        className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-ink-mute hover:text-red-600 p-1 rounded"
+      >
+        <Trash2 size={13} />
+      </button>
     </div>
   );
 }

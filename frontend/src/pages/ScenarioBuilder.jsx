@@ -7,7 +7,8 @@ import {
 import {
   getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, fmtCurrency, fmtNumber,
 } from '../lib/api';
-import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import HourlyLineChart from '../components/HourlyLineChart';
 
 const HINT_PROMPTS = [
   'Just make it cheaper',
@@ -132,7 +133,6 @@ function RetailerNegotiation({ scenario }) {
 function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, onToggleExpand }) {
   const totalLow   = scenario.savings_annual_low  ?? 0;
   const totalHigh  = scenario.savings_annual_high ?? 0;
-  const afterCurves = getAfterApplianceCurves(scenario);
 
   return (
     <div
@@ -194,50 +194,50 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
       {expanded && (
         <div className="border-t border-line bg-cream-100/50 px-5 py-6 space-y-6">
 
-          {/* 1 — Before / After charts (full width, bigger) */}
-          <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
-              Load Profile — Before vs After
-            </h4>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white border border-line rounded-xl p-3">
-                <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
-                <StackedAreaChart
-                  applianceCurves={scenario.baseline_appliance_curves || {}}
-                  scales={{}}
-                  height={260}
-                  showLegend={false}
-                  testId={`scenario-chart-before-${scenario.id}`}
-                />
+          {/* 1 — Before / After line charts: appliance curve + total demand */}
+          {(() => {
+            const change = scenario.appliance_changes?.[0];
+            const appColor = APPLIANCE_LAYERS.find((l) => l.key === change?.appliance)?.color || '#5b4bff';
+            return (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+                  Load Profile — Before vs After
+                </h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-white border border-line rounded-xl p-3">
+                    <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
+                    <HourlyLineChart
+                      series={scenario.baseline_curve || []}
+                      overlay={change?.before_curve || null}
+                      height={200}
+                      testId={`scenario-chart-before-${scenario.id}`}
+                    />
+                  </div>
+                  <div className="bg-white border border-line rounded-xl p-3">
+                    <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
+                    <HourlyLineChart
+                      series={scenario.shifted_curve || scenario.baseline_curve || []}
+                      overlay={change?.after_curve || null}
+                      height={200}
+                      testId={`scenario-chart-after-${scenario.id}`}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-5 mt-2 px-1">
+                  <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                    <span className="inline-block w-5 border-t-2 border-forest-900 opacity-70" />
+                    Total demand
+                  </span>
+                  {change?.appliance && (
+                    <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                      <span className="inline-block w-5 border-t-2 border-violet" />
+                      {change.appliance}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="bg-white border border-line rounded-xl p-3">
-                <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
-                <StackedAreaChart
-                  applianceCurves={afterCurves}
-                  scales={{}}
-                  height={260}
-                  baseline={scenario.baseline_curve}
-                  showLegend={false}
-                  testId={`scenario-chart-after-${scenario.id}`}
-                />
-              </div>
-            </div>
-            {/* Shared legend */}
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-3 px-1">
-              {APPLIANCE_LAYERS.filter((l) =>
-                Object.keys(scenario.baseline_appliance_curves || {}).includes(l.key)
-              ).map((l) => (
-                <span key={l.key} className="flex items-center gap-1.5 text-[11px] text-ink-soft">
-                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: l.color }} />
-                  {l.key}
-                </span>
-              ))}
-              <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
-                <span className="inline-block w-6 border-t border-dashed border-forest-700 opacity-60" />
-                Baseline
-              </span>
-            </div>
-          </div>
+            );
+          })()}
 
           {/* 2 — Appliance changes */}
           {scenario.appliance_changes && scenario.appliance_changes.length > 0 && (
