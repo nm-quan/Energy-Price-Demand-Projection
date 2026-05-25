@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Brain, Check, ChevronDown, ChevronUp,
+  ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import {
   getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
@@ -17,7 +17,6 @@ const HINT_PROMPTS = [
   'Minimise demand charges',
 ];
 
-// Reconstruct after-appliance-curves by patching in any changed appliance curves
 function getAfterApplianceCurves(scenario) {
   const after = { ...(scenario.baseline_appliance_curves || {}) };
   for (const change of (scenario.appliance_changes || [])) {
@@ -28,7 +27,7 @@ function getAfterApplianceCurves(scenario) {
   return after;
 }
 
-// ── Appliance before/after bar chart (per appliance kWh comparison) ─────────
+// ── Appliance before/after bars ──────────────────────────────────────────────
 function ApplianceChangeBars({ changes }) {
   if (!changes || changes.length === 0) return null;
   const rows = changes.map((c) => {
@@ -56,8 +55,8 @@ function ApplianceChangeBars({ changes }) {
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
                 <span className="text-[10px] w-12 text-ink-mute uppercase tracking-wide flex-shrink-0">Before</span>
-                <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
-                  <div className="h-full rounded transition-all" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.45 }} />
+                <div className="flex-1 bg-cream-200 rounded h-3 overflow-hidden">
+                  <div className="h-full rounded" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.45 }} />
                 </div>
                 <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right flex-shrink-0">
                   {fmtNumber(r.beforeKwh, 0)} kWh
@@ -65,8 +64,8 @@ function ApplianceChangeBars({ changes }) {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] w-12 text-ink-mute uppercase tracking-wide flex-shrink-0">After</span>
-                <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
-                  <div className="h-full rounded transition-all" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
+                <div className="flex-1 bg-cream-200 rounded h-3 overflow-hidden">
+                  <div className="h-full rounded" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
                 </div>
                 <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right flex-shrink-0">
                   {fmtNumber(r.afterKwh, 0)} kWh
@@ -85,11 +84,10 @@ function ApplianceChangeBars({ changes }) {
   );
 }
 
-// ── Retailer comparison table (negotiation lever) ───────────────────────────
+// ── Retailer negotiation ──────────────────────────────────────────────────────
 function RetailerNegotiation({ scenario }) {
   const winner = scenario.retailer_winner;
   const levers = scenario.negotiation_levers || [];
-
   return (
     <div className="bg-cream-50 border border-line rounded-xl p-4" data-testid="retailer-negotiation">
       <div className="flex items-baseline justify-between mb-3">
@@ -114,10 +112,10 @@ function RetailerNegotiation({ scenario }) {
   );
 }
 
-// ── Scenario card ──────────────────────────────────────────────────────────
+// ── Scenario card ─────────────────────────────────────────────────────────────
 function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, onToggleExpand }) {
-  const totalLow  = scenario.savings_annual_low  ?? 0;
-  const totalHigh = scenario.savings_annual_high ?? 0;
+  const totalLow   = scenario.savings_annual_low  ?? 0;
+  const totalHigh  = scenario.savings_annual_high ?? 0;
   const afterCurves = getAfterApplianceCurves(scenario);
 
   return (
@@ -127,7 +125,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
         selected ? 'border-violet ring-2 ring-violet/30' : 'border-line hover:border-forest-300'
       }`}
     >
-      {/* ── Collapsed header — always visible ── */}
+      {/* Collapsed header — always visible */}
       <div className="p-5">
         <div className="flex items-center gap-4">
           <button
@@ -169,36 +167,22 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
         </div>
       </div>
 
-      {/* ── Expanded detail ── */}
+      {/* Expanded detail */}
       {expanded && (
-        <div className="border-t border-line bg-cream-100/50 px-5 py-5 space-y-6">
-          {/* Rationale + savings */}
-          <div className="flex items-start justify-between gap-6">
-            {scenario.rationale && (
-              <p className="text-sm text-ink-soft leading-relaxed flex-1">{scenario.rationale}</p>
-            )}
-            <div className="text-right flex-shrink-0">
-              <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual saving</p>
-              <p className="text-lg font-display text-violet tabnum">
-                {fmtCurrency(totalLow)}
-                <span className="text-xs text-ink-mute mx-1">–</span>
-                {fmtCurrency(totalHigh)}
-              </p>
-            </div>
-          </div>
+        <div className="border-t border-line bg-cream-100/50 px-5 py-6 space-y-6">
 
-          {/* Before / After charts side by side */}
+          {/* 1 — Before / After charts (full width, bigger) */}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
               Load Profile — Before vs After
             </h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3">
               <div className="bg-white border border-line rounded-xl p-3">
                 <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
                 <StackedAreaChart
                   applianceCurves={scenario.baseline_appliance_curves || {}}
                   scales={{}}
-                  height={220}
+                  height={260}
                   showLegend={false}
                   testId={`scenario-chart-before-${scenario.id}`}
                 />
@@ -208,7 +192,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
                 <StackedAreaChart
                   applianceCurves={afterCurves}
                   scales={{}}
-                  height={220}
+                  height={260}
                   baseline={scenario.baseline_curve}
                   showLegend={false}
                   testId={`scenario-chart-after-${scenario.id}`}
@@ -232,7 +216,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
             </div>
           </div>
 
-          {/* Appliance changes */}
+          {/* 2 — Appliance changes */}
           {scenario.appliance_changes && scenario.appliance_changes.length > 0 && (
             <div>
               <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
@@ -242,76 +226,57 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
             </div>
           )}
 
-          {/* Retailer negotiation */}
-          <RetailerNegotiation scenario={scenario} />
+          {/* 3 — Summary: rationale + savings + retailer */}
+          <div className="space-y-4">
+            <div className="flex items-start justify-between gap-6">
+              {scenario.rationale && (
+                <p className="text-sm text-ink-soft leading-relaxed flex-1">{scenario.rationale}</p>
+              )}
+              <div className="text-right flex-shrink-0">
+                <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual saving</p>
+                <p className="text-lg font-display text-violet tabnum">
+                  {fmtCurrency(totalLow)}
+                  <span className="text-xs text-ink-mute mx-1">–</span>
+                  {fmtCurrency(totalHigh)}
+                </p>
+              </div>
+            </div>
+            <RetailerNegotiation scenario={scenario} />
+          </div>
+
         </div>
       )}
     </div>
   );
 }
 
-// ── Agent Memory side panel ─────────────────────────────────────────────────
-function AgentMemoryPanel({ memory }) {
-  if (!memory || memory.length === 0) {
-    return (
-      <div className="memo-card p-4" data-testid="agent-memory-empty">
-        <p className="flex items-center gap-2 text-forest-700 mb-2 font-sans font-semibold text-sm">
-          <Brain size={14} /> Agent Memory
-        </p>
-        <p className="text-ink-mute font-sans text-xs">
-          Generate scenarios to see what the agent learned about this site.
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div className="memo-card p-4" data-testid="agent-memory-panel">
-      <p className="flex items-center gap-2 text-forest-800 mb-3 font-sans font-semibold text-sm">
-        <Brain size={14} className="text-violet" /> Agent Memory
-      </p>
-      <ul className="space-y-2">
-        {memory.map((bullet, i) => (
-          <li key={i} className="flex items-start gap-2">
-            <span className="text-violet flex-shrink-0">·</span>
-            <span>{bullet}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-// ── Main page ──────────────────────────────────────────────────────────────
+// ── Main page ─────────────────────────────────────────────────────────────────
 export default function ScenarioBuilder() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [client, setClient]               = useState(null);
-  const [scenarios, setScenarios]         = useState([]);
-  const [agentMemory, setAgentMemory]     = useState([]);
-  const [count, setCount]                 = useState(3);
+  const [client,           setClient]           = useState(null);
+  const [scenarios,        setScenarios]        = useState([]);
+  const [count,            setCount]            = useState(3);
   const [extraInstruction, setExtraInstruction] = useState('');
-  const [generating, setGenerating]       = useState(false);
-  const [progress, setProgress]           = useState('');
-  const [error, setError]                 = useState('');
-  const [selectedIds, setSelectedIds]     = useState(new Set());
-  const [expandedId, setExpandedId]       = useState(null);
-  const [creatingReport, setCreatingReport] = useState(false);
+  const [generating,       setGenerating]       = useState(false);
+  const [progress,         setProgress]         = useState('');
+  const [error,            setError]            = useState('');
+  const [selectedIds,      setSelectedIds]      = useState(new Set());
+  const [expandedId,       setExpandedId]       = useState(null);
+  const [creatingReport,   setCreatingReport]   = useState(false);
 
   useEffect(() => {
-    const fetch = async () => {
+    (async () => {
       try {
         const [clientRes, scenariosRes] = await Promise.all([getClient(id), listScenarios(id)]);
         setClient(clientRes.data);
         sessionStorage.setItem(`client_name_${id}`, clientRes.data.name);
-        const list = scenariosRes.data || [];
-        setScenarios(list);
-        if (list.length > 0) setAgentMemory(list[0].agent_memory || []);
+        setScenarios(scenariosRes.data || []);
       } catch (err) {
         setError(err.response?.data?.detail || 'Failed to load page.');
       }
-    };
-    fetch();
+    })();
   }, [id]);
 
   const runGenerate = async () => {
@@ -330,7 +295,6 @@ export default function ScenarioBuilder() {
         if (job.status === 'done') {
           const newScenarios = job.scenarios || [];
           setScenarios((cur) => [...newScenarios, ...cur]);
-          setAgentMemory(job.agent_memory || []);
           if (newScenarios[0]) setExpandedId(newScenarios[0].id);
           setExtraInstruction('');
           setGenerating(false);
@@ -363,7 +327,6 @@ export default function ScenarioBuilder() {
     await clearClientScenarios(id);
     setScenarios([]);
     setSelectedIds(new Set());
-    setAgentMemory([]);
   };
 
   const toggleSelect = (sid) => {
@@ -414,8 +377,10 @@ export default function ScenarioBuilder() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
+
         {/* Main column */}
         <div className="lg:col-span-5 space-y-5">
+
           {/* Generator card */}
           <div className="bg-forest-800 text-white rounded-2xl p-6 shadow-card">
             <div className="flex items-center gap-3 mb-4">
@@ -507,16 +472,14 @@ export default function ScenarioBuilder() {
                 <span className="font-semibold text-forest-800">{scenarios.length}</span> scenario{scenarios.length === 1 ? '' : 's'} ·
                 <span className="font-semibold text-violet ml-1">{selectedIds.size}</span> selected
               </p>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleClearAll}
-                  data-testid="clear-scenarios-btn"
-                  className="text-xs inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
-                >
-                  <Trash2 size={12} /> Clear all
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={handleClearAll}
+                data-testid="clear-scenarios-btn"
+                className="text-xs inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
+              >
+                <Trash2 size={12} /> Clear all
+              </button>
             </div>
           )}
 
@@ -535,10 +498,8 @@ export default function ScenarioBuilder() {
           </div>
         </div>
 
-        {/* Side rail */}
-        <aside className="lg:col-span-2 space-y-4">
-          <AgentMemoryPanel memory={agentMemory} />
-
+        {/* Side rail — report bundler only */}
+        <aside className="lg:col-span-2">
           {scenarios.length > 0 && (
             <div className="bg-violet/10 border border-violet/30 rounded-2xl p-4">
               <h3 className="font-display text-lg text-forest-900 mb-1">Bundle into a report</h3>
