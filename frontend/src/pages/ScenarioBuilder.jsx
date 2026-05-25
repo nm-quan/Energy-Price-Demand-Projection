@@ -32,9 +32,19 @@ function getAfterApplianceCurves(scenario) {
 function ApplianceChangeBars({ changes }) {
   if (!changes || changes.length === 0) return null;
   const rows = changes.map((c) => {
-    const beforeKwh = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
-    const afterKwh  = (c.after_curve  || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
-    return { ...c, beforeKwh, afterKwh, delta: afterKwh - beforeKwh };
+    const beforeTotal = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterTotal  = (c.after_curve  || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const totalDelta  = afterTotal - beforeTotal;
+    // Peak window: buckets 30–42 = 3pm–9pm
+    const beforePeak  = (c.before_curve || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterPeak   = (c.after_curve  || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const peakDelta   = afterPeak - beforePeak;
+    // Shift: total barely changes but peak drops — show peak kWh so bars differ visually
+    const isShift = Math.abs(totalDelta) < 0.5 && Math.abs(peakDelta) > 0.05;
+    const beforeKwh = isShift ? beforePeak : beforeTotal;
+    const afterKwh  = isShift ? afterPeak  : afterTotal;
+    const delta     = isShift ? peakDelta  : totalDelta;
+    return { ...c, beforeKwh, afterKwh, delta, isShift };
   });
   const maxAbs = Math.max(...rows.map((r) => Math.max(r.beforeKwh, r.afterKwh)), 1);
 
@@ -44,12 +54,17 @@ function ApplianceChangeBars({ changes }) {
         const layerColor = APPLIANCE_LAYERS.find((l) => l.key === r.appliance)?.color || '#5b4bff';
         const beforeW = (r.beforeKwh / maxAbs) * 100;
         const afterW  = (r.afterKwh  / maxAbs) * 100;
+        const positive = r.delta < 0;
+        const label = r.isShift
+          ? `${positive ? '−' : '+'}${fmtNumber(Math.abs(r.delta), 1)} kWh peak · shifted off-peak`
+          : `${positive ? '−' : '+'}${fmtNumber(Math.abs(r.delta), 0)} kWh/day · ${positive ? 'reduced' : 'added'}`;
         return (
           <div key={i} className="bg-white border border-line rounded-xl p-3">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-forest-900 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: layerColor }} />
                 {r.appliance}
+                {r.isShift && <span className="text-[10px] font-normal text-ink-mute uppercase tracking-wide">peak window</span>}
               </span>
               <span className="text-[11px] text-ink-mute max-w-[60%] text-right leading-snug">{r.summary}</span>
             </div>
@@ -60,7 +75,7 @@ function ApplianceChangeBars({ changes }) {
                   <div className="h-full rounded" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.45 }} />
                 </div>
                 <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right flex-shrink-0">
-                  {fmtNumber(r.beforeKwh, 0)} kWh
+                  {fmtNumber(r.beforeKwh, 1)} kWh
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -69,12 +84,12 @@ function ApplianceChangeBars({ changes }) {
                   <div className="h-full rounded" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
                 </div>
                 <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right flex-shrink-0">
-                  {fmtNumber(r.afterKwh, 0)} kWh
+                  {fmtNumber(r.afterKwh, 1)} kWh
                 </span>
               </div>
               <div className="pl-14">
-                <span className={`text-[11px] tabnum font-medium ${r.delta < 0 ? 'text-forest-700' : 'text-amber-600'}`}>
-                  {r.delta < 0 ? '−' : '+'}{fmtNumber(Math.abs(r.delta), 0)} kWh/day · {r.delta < 0 ? 'reduced' : 'added'}
+                <span className={`text-[11px] tabnum font-medium ${positive ? 'text-forest-700' : 'text-amber-600'}`}>
+                  {label}
                 </span>
               </div>
             </div>
