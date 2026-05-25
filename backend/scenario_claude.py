@@ -181,7 +181,12 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
     name = inp.get("appliance")
     action = inp.get("action")
     if name not in appliance_curves:
-        return {"error": f"Unknown appliance '{name}'. Available: {list(appliance_curves.keys())}"}
+        # Case-insensitive fallback
+        matched = next((k for k in appliance_curves if k.lower() == (name or "").lower()), None)
+        if matched:
+            name = matched
+        else:
+            return {"error": f"Unknown appliance '{name}'. Available: {list(appliance_curves.keys())}"}
 
     before = list(appliance_curves[name])
     after = list(before)
@@ -251,26 +256,23 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
 
 # ── Per-scenario system prompt ──────────────────────────────────────────────
 
-PER_SCENARIO_SYSTEM = """You are an energy savings analyst. Generate ONE realistic load-shift scenario for this site.
+PER_SCENARIO_SYSTEM = """You are an energy cost analyst. Generate ONE load-shift scenario using the tools in this exact order:
 
-MANDATORY WORKFLOW — follow this exact sequence, no deviations:
-STEP 1: Call simulate_appliance_change at least once (you MUST do this — never skip it).
-         Pick a meaningful operational change for the site_type (e.g. shift HVAC pre-cooling,
-         reduce oven peak usage, shift dishwasher from peak to off-peak).
-         Use realistic factors: scale 0.5–0.9 for reductions, shift 30–50% of load from peak (buckets 30–42) to off-peak.
-STEP 2: Optionally call simulate_appliance_change again for a second appliance if it makes sense.
-STEP 3: Call compare_retailers ONCE with the final shifted curve from your last simulate_appliance_change result.
-STEP 4: Call commit_scenario ONCE with the complete payload.
+STEP 1 — simulate_appliance_change
+  Pick the highest-load appliance. Shift or reduce it during peak hours (buckets 30–42 = 3pm–9pm).
+  Use from_scale 0.4–0.7 for a meaningful reduction. Use the exact appliance name from the user message.
 
-RULES:
-- You MUST call simulate_appliance_change before commit_scenario. If you skip it, the scenario will have 0 savings and be discarded.
-- savings_annual_low and savings_annual_high MUST both be > 0 (based on the annual_saving_on_current_tariff from simulate + retailer delta).
-- savings_annual_high >= savings_annual_low.
-- Buckets: 0–47 half-hourly (bucket 0=midnight, 16=8am, 30=3pm peak start, 42=9pm peak end).
-- For TOU tariffs: focus on shifting load OUT of peak window buckets 30–42.
-- Be SPECIFIC to the site_type: a cafe has espresso machines and ovens; an office has HVAC and lighting; etc.
-- memory_bullets: 2–3 plain-English insights specific to THIS site. Not generic advice.
-- Do NOT respond with plain text or markdown. Only call the tools."""
+STEP 2 — compare_retailers
+  Pass the total_curve_after from STEP 1 as load_curve.
+
+STEP 3 — commit_scenario
+  Fill all fields. savings_annual_low and savings_annual_high MUST both be > 0.
+  Base them on annual_saving_on_current_tariff (STEP 1) + retailer delta (STEP 2).
+
+Rules:
+- Use exact appliance names as given — do not rename or invent appliances.
+- Do not skip any step.
+- Do not respond in text. Only call tools."""
 
 
 def _build_user_message_one(
@@ -287,12 +289,14 @@ def _build_user_message_one(
     rates = tariff.energy_rates
     top_appliances = sorted(appliance_share.items(), key=lambda kv: -kv[1])[:4]
     appliance_str = ", ".join(f"{k} {v*100:.0f}%" for k, v in top_appliances)
+    all_appliances = list(appliance_share.keys())
     msg = (
         f"Site: {client.get('name')}, {client.get('address') or 'address not provided'}\n"
         f"Site type: {client.get('site_type')}\n"
         f"Annual: {annual_kwh:.0f} kWh · Peak: {shape.get('peak_kw', 0):.1f} kW · Load factor: {(shape.get('load_factor') or 0) * 100:.0f}%\n"
         f"Peak coincidence (3–9pm share): {(shape.get('peak_coincidence') or 0) * 100:.0f}%\n"
-        f"Top appliances: {appliance_str}\n"
+        f"Appliance breakdown: {appliance_str}\n"
+        f"Available appliance names (use exactly as written): {', '.join(all_appliances)}\n"
         f"Current tariff: {tariff.retailer} {tariff.plan_name} — Peak ${rates.peak or 0:.3f}, Shoulder ${rates.shoulder or 0:.3f}, Off-peak ${rates.offpeak or 0:.3f} per kWh\n\n"
         f"This is scenario {scenario_idx} of {total_count}. Generate ONE load-shift scenario."
     )
@@ -360,11 +364,18 @@ def _generate_one(
     last_retailer_table: Optional[Dict[str, Any]] = None
 
     for _turn in range(MAX_TURNS):
+        # Force simulate_appliance_change on turn 1; any tool after that
+        tool_choice = (
+            {"type": "tool", "name": "simulate_appliance_change"}
+            if _turn == 0
+            else {"type": "any"}
+        )
         resp = cli.messages.create(
             model=MODEL_NAME,
             system=PER_SCENARIO_SYSTEM,
             messages=messages,
             tools=TOOLS,
+            tool_choice=tool_choice,
             max_tokens=MAX_TOKENS,
         )
 
@@ -426,21 +437,15 @@ def _generate_one(
                 return _finalize_committed(committed, state, last_retailer_table)
             continue
 
-        # No tool-use blocks in this turn
+        # No tool-use blocks (shouldn't happen with tool_choice=any, but handle gracefully)
         if committed:
             return _finalize_committed(committed, state, last_retailer_table)
 
-        # Maybe Claude returned JSON inline in text
         inline_text = "\n".join(b.text for b in text_blocks if b.text).strip()
         parsed = _try_parse_json(inline_text)
         if parsed and parsed.get("appliance_changes"):
             return _finalize_committed(parsed, state, last_retailer_table)
 
-        # Nudge it to use the tools
-        messages.append({
-            "role": "user",
-            "content": "Please proceed by calling the tools (simulate_appliance_change → compare_retailers → commit_scenario). Do not respond in plain text.",
-        })
         continue
 
     logger.warning("scenario hit MAX_TURNS=%d without commit", MAX_TURNS)

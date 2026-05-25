@@ -10,12 +10,12 @@ import {
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 
 const HINT_PROMPTS = [
-  'Focus on HVAC pre-cooling',
-  'Include a battery option',
-  'Cheapest capex, fastest payback',
-  'Switch retailer + shift load',
-  'Aggressive load-shift to off-peak',
-  'Minimise demand charges',
+  'Just make it cheaper',
+  'No upfront cost',
+  'Fastest payback',
+  'Switch retailer too',
+  'Cut the peak bill',
+  'Overnight shift only',
 ];
 
 function getAfterApplianceCurves(scenario) {
@@ -426,7 +426,7 @@ export default function ScenarioBuilder() {
                 type="text"
                 value={extraInstruction}
                 onChange={(e) => setExtraInstruction(e.target.value)}
-                placeholder="Optional focus (e.g. battery only, no capex over $20k)…"
+                placeholder="e.g. just make it cheaper, no big installs…"
                 data-testid="extra-instruction-input"
                 className="flex-1 min-w-[200px] bg-forest-700 border border-forest-600 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-lime placeholder:text-forest-100/30"
               />
