@@ -1,8 +1,5 @@
 """
-Scenario generator powered by Claude via the Emergent universal-key proxy.
-
-Uses the OpenAI SDK (the Emergent proxy is OpenAI-compatible) so we can swap
-between the user's key (Anthropic format) and the universal key with one base_url change.
+Scenario generator powered by Claude (Haiku — direct Anthropic SDK).
 
 Each scenario is its own conversation, run in parallel via a thread pool.
 Tools available per scenario:
@@ -16,140 +13,118 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from openai import OpenAI
+import anthropic
 
 from models import Tariff
 from baseline_engine import compute_annual_cost_components, compute_shape_metrics
 
 logger = logging.getLogger("scenario_claude")
 
-MODEL_NAME = "claude-sonnet-4-5-20250929"
-MAX_TURNS = 12
+MODEL_NAME = "claude-haiku-4-5-20251001"
+MAX_TURNS = 8
 MAX_TOKENS = 2048
-EMERGENT_PROXY_URL = "https://integrations.emergentagent.com/llm"
 
 
 def _has_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _get_app_id() -> Optional[str]:
-    """Returns the X-App-ID required by the Emergent proxy to apply the correct budget."""
-    return os.environ.get("APP_URL") or os.environ.get("REACT_APP_BACKEND_URL")
-
-
-def _get_client() -> OpenAI:
+def _get_client() -> anthropic.Anthropic:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
-    headers: Dict[str, str] = {}
-    app_id = _get_app_id()
-    if app_id:
-        headers["X-App-ID"] = app_id
-    # Both Emergent universal keys (sk-emergent-…) and personal Anthropic keys (sk-ant-…)
-    # route through the proxy here. The proxy maps the OpenAI-format request to Anthropic's
-    # native Messages API behind the scenes.
-    return OpenAI(api_key=api_key, base_url=EMERGENT_PROXY_URL, default_headers=headers)
+    return anthropic.Anthropic(api_key=api_key)
 
 
-# ── Tool schemas (OpenAI function-calling format) ───────────────────────────
+# ── Tool schemas (Anthropic format) ─────────────────────────────────────────
 
 TOOLS: List[Dict[str, Any]] = [
     {
-        "type": "function",
-        "function": {
-            "name": "compare_retailers",
-            "description": (
-                "Compare 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) against "
-                "the supplied SHIFTED load curve. Returns per-retailer annual cost and delta vs the "
-                "client's current tariff. Call ONCE per scenario after the final shifted curve is set."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "load_curve": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "48 half-hourly kW values for the SHIFTED profile",
-                    },
-                    "annual_kwh": {"type": "number"},
+        "name": "compare_retailers",
+        "description": (
+            "Compare 5 AU retailers (AGL, Origin, EnergyAustralia, Alinta, Red Energy) against "
+            "the supplied SHIFTED load curve. Returns per-retailer annual cost and delta vs the "
+            "client's current tariff. Call ONCE per scenario after the final shifted curve is set."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "load_curve": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "48 half-hourly kW values for the SHIFTED profile",
                 },
-                "required": ["load_curve", "annual_kwh"],
+                "annual_kwh": {"type": "number"},
             },
+            "required": ["load_curve", "annual_kwh"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "simulate_appliance_change",
-            "description": (
-                "Apply ONE operational change to ONE appliance. Returns before/after appliance "
-                "curves, the new total load curve, and savings vs baseline on the current tariff. "
-                "Chain multiple calls — state persists across calls within this scenario."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "appliance": {"type": "string"},
-                    "action": {
-                        "type": "string",
-                        "enum": ["scale", "shift_window", "set_off"],
-                        "description": (
-                            "scale=multiply this appliance by scale_factor across all buckets; "
-                            "shift_window=move fraction of energy from from_window to to_window; "
-                            "set_off=turn appliance off (1-from_scale) during from_window"
-                        ),
-                    },
-                    "scale_factor": {"type": "number"},
-                    "from_window": {"type": "array", "items": {"type": "integer"}},
-                    "to_window": {"type": "array", "items": {"type": "integer"}},
-                    "from_scale": {"type": "number"},
+        "name": "simulate_appliance_change",
+        "description": (
+            "Apply ONE operational change to ONE appliance. Returns before/after appliance "
+            "curves, the new total load curve, and savings vs baseline on the current tariff. "
+            "Chain multiple calls — state persists across calls within this scenario."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "appliance": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["scale", "shift_window", "set_off"],
+                    "description": (
+                        "scale=multiply this appliance by scale_factor across all buckets; "
+                        "shift_window=move fraction of energy from from_window to to_window; "
+                        "set_off=turn appliance off (1-from_scale) during from_window"
+                    ),
                 },
-                "required": ["appliance", "action"],
+                "scale_factor": {"type": "number"},
+                "from_window": {"type": "array", "items": {"type": "integer"}},
+                "to_window": {"type": "array", "items": {"type": "integer"}},
+                "from_scale": {"type": "number"},
             },
+            "required": ["appliance", "action"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "commit_scenario",
-            "description": "Return the final scenario summary. Call exactly ONCE. Curves are filled in server-side from your simulate_appliance_change history.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "rationale": {"type": "string"},
-                    "appliance_changes": {
-                        "type": "array",
-                        "description": "Brief summary of each change (no curves — server adds them).",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "appliance": {"type": "string"},
-                                "action": {"type": "string"},
-                                "summary": {"type": "string"},
-                            },
-                            "required": ["appliance", "action", "summary"],
+        "name": "commit_scenario",
+        "description": "Return the final scenario summary. Call exactly ONCE. Curves are filled in server-side from your simulate_appliance_change history.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "rationale": {"type": "string"},
+                "appliance_changes": {
+                    "type": "array",
+                    "description": "Brief summary of each change (no curves — server adds them).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "appliance": {"type": "string"},
+                            "action": {"type": "string"},
+                            "summary": {"type": "string"},
                         },
+                        "required": ["appliance", "action", "summary"],
                     },
-                    "retailer_winner": {"type": "string"},
-                    "negotiation_levers": {"type": "array", "items": {"type": "string"}},
-                    "memory_bullets": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "2-3 plain-English insights about THIS site (shown to the broker as quick context).",
-                    },
-                    "savings_annual_low": {"type": "number"},
-                    "savings_annual_high": {"type": "number"},
                 },
-                "required": [
-                    "name", "rationale", "appliance_changes",
-                    "retailer_winner", "negotiation_levers", "memory_bullets",
-                    "savings_annual_low", "savings_annual_high",
-                ],
+                "retailer_winner": {"type": "string"},
+                "negotiation_levers": {"type": "array", "items": {"type": "string"}},
+                "memory_bullets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "2-3 plain-English insights about THIS site (shown to the broker as quick context).",
+                },
+                "savings_annual_low": {"type": "number"},
+                "savings_annual_high": {"type": "number"},
             },
+            "required": [
+                "name", "rationale", "appliance_changes",
+                "retailer_winner", "negotiation_levers", "memory_bullets",
+                "savings_annual_low", "savings_annual_high",
+            ],
         },
     },
 ]
@@ -354,7 +329,7 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _generate_one(
-    cli: OpenAI,
+    cli: anthropic.Anthropic,
     client: Dict[str, Any],
     appliance_curves: Dict[str, List[float]],
     baseline_curve: List[float],
@@ -377,47 +352,39 @@ def _generate_one(
         client, shape, tariff, annual_kwh, appliance_share,
         scenario_idx, total_count, extra_instruction, avoid_themes,
     )
+    # System prompt is passed separately in the Anthropic SDK
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": PER_SCENARIO_SYSTEM},
         {"role": "user", "content": user_msg},
     ]
     committed: Optional[Dict[str, Any]] = None
     last_retailer_table: Optional[Dict[str, Any]] = None
 
     for _turn in range(MAX_TURNS):
-        resp = cli.chat.completions.create(
+        resp = cli.messages.create(
             model=MODEL_NAME,
+            system=PER_SCENARIO_SYSTEM,
             messages=messages,
             tools=TOOLS,
             max_tokens=MAX_TOKENS,
         )
-        choice = resp.choices[0]
-        msg = choice.message
-        tool_calls = getattr(msg, "tool_calls", None) or []
 
-        # Always append the assistant message
-        assistant_record: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-        if tool_calls:
-            assistant_record["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in tool_calls
-            ]
-        messages.append(assistant_record)
+        tu_blocks = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+        text_blocks = [b for b in resp.content if getattr(b, "type", None) == "text"]
 
-        if tool_calls:
-            for tc in tool_calls:
-                fname = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+        # Build assistant content list for message history
+        assistant_content: List[Dict[str, Any]] = []
+        for b in resp.content:
+            if getattr(b, "type", None) == "text":
+                assistant_content.append({"type": "text", "text": b.text})
+            elif getattr(b, "type", None) == "tool_use":
+                assistant_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if tu_blocks:
+            tool_results: List[Dict[str, Any]] = []
+            for tu in tu_blocks:
+                fname = tu.name
+                args = tu.input or {}  # already a dict in Anthropic SDK
                 try:
                     if fname == "compare_retailers":
                         out = compute_retailer_comparison(
@@ -445,23 +412,30 @@ def _generate_one(
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("tool %s failed", fname)
                     out = {"error": str(exc)}
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
                     "content": json.dumps(out),
                 })
+
+            # All tool results go in a single user message
+            messages.append({"role": "user", "content": tool_results})
 
             if committed:
                 return _finalize_committed(committed, state, last_retailer_table)
             continue
 
-        # No tool calls in this turn
+        # No tool-use blocks in this turn
         if committed:
             return _finalize_committed(committed, state, last_retailer_table)
-        # Maybe Claude returned JSON inline
-        parsed = _try_parse_json(msg.content or "")
+
+        # Maybe Claude returned JSON inline in text
+        inline_text = "\n".join(b.text for b in text_blocks if b.text).strip()
+        parsed = _try_parse_json(inline_text)
         if parsed and parsed.get("appliance_changes"):
             return _finalize_committed(parsed, state, last_retailer_table)
+
         # Nudge it to use the tools
         messages.append({
             "role": "user",
@@ -512,6 +486,7 @@ def generate_scenarios(
     annual_kwh: float,
     count: int = 3,
     extra_instruction: Optional[str] = None,
+    on_scenario_done: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Generate N scenarios in parallel via thread pool."""
     cli = _get_client()
@@ -526,7 +501,7 @@ def generate_scenarios(
     avoid_themes: List[str] = []
     scenarios: List[Dict[str, Any]] = []
 
-    with ThreadPoolExecutor(max_workers=min(count, 2)) as pool:
+    with ThreadPoolExecutor(max_workers=min(count, 3)) as pool:
         futures = {
             pool.submit(
                 _generate_one,
@@ -541,6 +516,11 @@ def generate_scenarios(
                 result = fut.result()
                 if result and result.get("shifted_curve"):
                     scenarios.append(result)
+                    if on_scenario_done is not None:
+                        try:
+                            on_scenario_done(result)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("on_scenario_done callback raised for scenario %d", idx)
                 else:
                     logger.warning("scenario %d returned no committed payload (result=%s)", idx, bool(result))
             except Exception as exc:  # noqa: BLE001

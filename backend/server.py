@@ -551,24 +551,9 @@ def _run_generation_job(
         appliance_curves = _split_appliance_curves(load_curve, dominant_type)
         baseline["load_curve"] = load_curve
 
-        result = generate_scenarios(
-            client=client,
-            baseline=baseline,
-            appliance_curves=appliance_curves,
-            tariff=tariff,
-            annual_kwh=annual_kwh,
-            count=count,
-            extra_instruction=extra_instruction,
-        )
-
-        if client_id not in data_store.clients:
-            with JOBS_LOCK:
-                JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": "Client deleted during generation"}
-            return
-
-        stored_ids: List[str] = []
         now = datetime.now(timezone.utc).isoformat()
-        for s in result.get("scenarios", []):
+
+        def _on_scenario_done(s: Dict[str, Any]) -> None:
             sid = f"scn-{uuid.uuid4().hex[:8]}"
             record = {
                 "id": sid,
@@ -581,14 +566,30 @@ def _run_generation_job(
                 **s,
             }
             data_store.scenarios[sid] = record
-            stored_ids.append(sid)
-        data_store.save_to_disk()
+            data_store.save_to_disk()
+            with JOBS_LOCK:
+                JOBS[job_id]["scenarios"].append(record)
+
+        result = generate_scenarios(
+            client=client,
+            baseline=baseline,
+            appliance_curves=appliance_curves,
+            tariff=tariff,
+            annual_kwh=annual_kwh,
+            count=count,
+            extra_instruction=extra_instruction,
+            on_scenario_done=_on_scenario_done,
+        )
+
+        if client_id not in data_store.clients:
+            with JOBS_LOCK:
+                JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": "Client deleted during generation"}
+            return
 
         with JOBS_LOCK:
             JOBS[job_id] = {
                 **JOBS.get(job_id, {}),
                 "status": "done",
-                "scenarios": [data_store.scenarios[sid] for sid in stored_ids],
                 "source": result.get("source", "claude"),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -614,6 +615,7 @@ def start_generate_job(client_id: str, body: GenerateScenariosRequest):
             "status": "running",
             "count": count,
             "started_at": datetime.now(timezone.utc).isoformat(),
+            "scenarios": [],
         }
     thread = threading.Thread(
         target=_run_generation_job,
