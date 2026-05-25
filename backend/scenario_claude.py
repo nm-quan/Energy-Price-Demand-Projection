@@ -269,10 +269,19 @@ def _finalize(
     retailer_table: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     sim_history = state.get("sim_history", [])
-    by_appliance = {rec["appliance"]: rec for rec in sim_history}
+    # Build lookup by canonical name AND lowercase — Claude may write "Espresso Machine" vs "Espresso"
+    by_appliance: Dict[str, Any] = {}
+    for rec in sim_history:
+        by_appliance[rec["appliance"]] = rec
+        by_appliance[rec["appliance"].lower()] = rec
 
-    for ch in committed.get("appliance_changes", []) or []:
-        rec = by_appliance.get(ch.get("appliance"))
+    for i, ch in enumerate(committed.get("appliance_changes", []) or []):
+        app_name = ch.get("appliance", "")
+        rec = (
+            by_appliance.get(app_name)
+            or by_appliance.get(app_name.lower())
+            or (sim_history[i] if i < len(sim_history) else None)  # positional fallback
+        )
         if rec:
             ch["before_curve"] = rec["before_curve"]
             ch["after_curve"] = rec["after_curve"]
