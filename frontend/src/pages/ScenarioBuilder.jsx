@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  ChevronRight, Loader, AlertCircle, Sparkles, Send, Trash2, ArrowRight, FileText, Brain, Check, ChevronDown, ChevronUp,
+  ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Brain, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import {
   getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
@@ -17,12 +17,23 @@ const HINT_PROMPTS = [
   'Minimise demand charges',
 ];
 
+// Reconstruct after-appliance-curves by patching in any changed appliance curves
+function getAfterApplianceCurves(scenario) {
+  const after = { ...(scenario.baseline_appliance_curves || {}) };
+  for (const change of (scenario.appliance_changes || [])) {
+    if (change.after_curve && change.appliance) {
+      after[change.appliance] = change.after_curve;
+    }
+  }
+  return after;
+}
+
 // ── Appliance before/after bar chart (per appliance kWh comparison) ─────────
 function ApplianceChangeBars({ changes }) {
   if (!changes || changes.length === 0) return null;
   const rows = changes.map((c) => {
     const beforeKwh = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
-    const afterKwh = (c.after_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterKwh  = (c.after_curve  || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
     return { ...c, beforeKwh, afterKwh, delta: afterKwh - beforeKwh };
   });
   const maxAbs = Math.max(...rows.map((r) => Math.max(r.beforeKwh, r.afterKwh)), 1);
@@ -32,36 +43,36 @@ function ApplianceChangeBars({ changes }) {
       {rows.map((r, i) => {
         const layerColor = APPLIANCE_LAYERS.find((l) => l.key === r.appliance)?.color || '#5b4bff';
         const beforeW = (r.beforeKwh / maxAbs) * 100;
-        const afterW = (r.afterKwh / maxAbs) * 100;
+        const afterW  = (r.afterKwh  / maxAbs) * 100;
         return (
-          <div key={i} className="bg-cream-50 border border-line rounded-xl p-3">
-            <div className="flex items-center justify-between text-xs mb-2">
-              <span className="font-semibold text-forest-900 flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: layerColor }} />
+          <div key={i} className="bg-white border border-line rounded-xl p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-forest-900 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: layerColor }} />
                 {r.appliance}
               </span>
-              <span className="text-ink-mute">{r.summary}</span>
+              <span className="text-[11px] text-ink-mute max-w-[60%] text-right leading-snug">{r.summary}</span>
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] w-12 text-ink-mute uppercase">Before</span>
+                <span className="text-[10px] w-12 text-ink-mute uppercase tracking-wide flex-shrink-0">Before</span>
                 <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
-                  <div className="h-full rounded transition-all" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.5 }} />
+                  <div className="h-full rounded transition-all" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.45 }} />
                 </div>
-                <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right">
+                <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right flex-shrink-0">
                   {fmtNumber(r.beforeKwh, 0)} kWh
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] w-12 text-ink-mute uppercase">After</span>
+                <span className="text-[10px] w-12 text-ink-mute uppercase tracking-wide flex-shrink-0">After</span>
                 <div className="flex-1 bg-cream-200 rounded h-3 relative overflow-hidden">
                   <div className="h-full rounded transition-all" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
                 </div>
-                <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right">
+                <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right flex-shrink-0">
                   {fmtNumber(r.afterKwh, 0)} kWh
                 </span>
               </div>
-              <div className="flex items-center gap-2 pl-14">
+              <div className="pl-14">
                 <span className={`text-[11px] tabnum font-medium ${r.delta < 0 ? 'text-forest-700' : 'text-amber-600'}`}>
                   {r.delta < 0 ? '−' : '+'}{fmtNumber(Math.abs(r.delta), 0)} kWh/day · {r.delta < 0 ? 'reduced' : 'added'}
                 </span>
@@ -85,7 +96,7 @@ function RetailerNegotiation({ scenario }) {
         <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900">Negotiation Playbook</h4>
         {winner && (
           <span className="text-xs text-ink-soft">
-            Recommended retailer: <span className="font-semibold text-violet">{winner}</span>
+            Recommended: <span className="font-semibold text-violet">{winner}</span>
           </span>
         )}
       </div>
@@ -105,8 +116,9 @@ function RetailerNegotiation({ scenario }) {
 
 // ── Scenario card ──────────────────────────────────────────────────────────
 function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, onToggleExpand }) {
-  const totalLow = scenario.savings_annual_low ?? 0;
+  const totalLow  = scenario.savings_annual_low  ?? 0;
   const totalHigh = scenario.savings_annual_high ?? 0;
+  const afterCurves = getAfterApplianceCurves(scenario);
 
   return (
     <div
@@ -115,8 +127,9 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
         selected ? 'border-violet ring-2 ring-violet/30' : 'border-line hover:border-forest-300'
       }`}
     >
+      {/* ── Collapsed header — always visible ── */}
       <div className="p-5">
-        <div className="flex items-start gap-4">
+        <div className="flex items-center gap-4">
           <button
             type="button"
             onClick={onToggleSelect}
@@ -130,68 +143,91 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
           </button>
 
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-[10px] uppercase tracking-wider text-ink-mute">#{scenario.rank}</span>
-            </div>
+            <span className="text-[10px] uppercase tracking-wider text-ink-mute">#{scenario.rank}</span>
             <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
-            {scenario.rationale && (
-              <p className="text-sm text-ink-soft mt-2 leading-relaxed">{scenario.rationale}</p>
-            )}
           </div>
 
-          <div className="text-right flex-shrink-0">
-            <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual saving</p>
-            <p className="text-lg font-display text-violet tabnum">
-              {fmtCurrency(totalLow)}
-              <span className="text-xs text-ink-mute mx-1">–</span>
-              {fmtCurrency(totalHigh)}
-            </p>
-            <div className="flex items-center gap-2 mt-2 justify-end">
-              <button
-                type="button"
-                onClick={onToggleExpand}
-                data-testid={`expand-scenario-${scenario.id}`}
-                className="text-[11px] inline-flex items-center gap-1 text-forest-700 hover:text-violet font-medium"
-              >
-                {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                {expanded ? 'Hide' : 'Details'}
-              </button>
-              <button
-                type="button"
-                onClick={onDelete}
-                data-testid={`delete-scenario-${scenario.id}`}
-                className="text-[11px] inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <button
+              type="button"
+              onClick={onToggleExpand}
+              data-testid={`expand-scenario-${scenario.id}`}
+              className="text-[11px] inline-flex items-center gap-1 text-forest-700 hover:text-violet font-medium"
+            >
+              {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              {expanded ? 'Hide' : 'Details'}
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              data-testid={`delete-scenario-${scenario.id}`}
+              className="text-[11px] inline-flex items-center gap-1 text-ink-mute hover:text-red-600"
+            >
+              <Trash2 size={12} />
+            </button>
           </div>
         </div>
       </div>
 
+      {/* ── Expanded detail ── */}
       {expanded && (
-        <div className="border-t border-line bg-cream-100/50 px-5 py-5 space-y-5">
-          {/* Hourly load curve overlay */}
+        <div className="border-t border-line bg-cream-100/50 px-5 py-5 space-y-6">
+          {/* Rationale + savings */}
+          <div className="flex items-start justify-between gap-6">
+            {scenario.rationale && (
+              <p className="text-sm text-ink-soft leading-relaxed flex-1">{scenario.rationale}</p>
+            )}
+            <div className="text-right flex-shrink-0">
+              <p className="text-[10px] uppercase tracking-wider text-ink-mute">Annual saving</p>
+              <p className="text-lg font-display text-violet tabnum">
+                {fmtCurrency(totalLow)}
+                <span className="text-xs text-ink-mute mx-1">–</span>
+                {fmtCurrency(totalHigh)}
+              </p>
+            </div>
+          </div>
+
+          {/* Before / After charts side by side */}
           <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-2">
-              Hourly Load — Before vs After
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+              Load Profile — Before vs After
             </h4>
-            <StackedAreaChart
-              applianceCurves={scenario.baseline_appliance_curves || {}}
-              scales={{}}
-              height={200}
-              baseline={scenario.baseline_curve}
-              overlay={scenario.shifted_curve}
-              testId={`scenario-chart-${scenario.id}`}
-            />
-            <div className="flex items-center gap-4 mt-2 text-[11px] text-ink-mute">
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block w-8 border-t-2 border-dashed border-forest-700" />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-white border border-line rounded-xl p-3">
+                <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
+                <StackedAreaChart
+                  applianceCurves={scenario.baseline_appliance_curves || {}}
+                  scales={{}}
+                  height={220}
+                  showLegend={false}
+                  testId={`scenario-chart-before-${scenario.id}`}
+                />
+              </div>
+              <div className="bg-white border border-line rounded-xl p-3">
+                <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
+                <StackedAreaChart
+                  applianceCurves={afterCurves}
+                  scales={{}}
+                  height={220}
+                  baseline={scenario.baseline_curve}
+                  showLegend={false}
+                  testId={`scenario-chart-after-${scenario.id}`}
+                />
+              </div>
+            </div>
+            {/* Shared legend */}
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-3 px-1">
+              {APPLIANCE_LAYERS.filter((l) =>
+                Object.keys(scenario.baseline_appliance_curves || {}).includes(l.key)
+              ).map((l) => (
+                <span key={l.key} className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: l.color }} />
+                  {l.key}
+                </span>
+              ))}
+              <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                <span className="inline-block w-6 border-t border-dashed border-forest-700 opacity-60" />
                 Baseline
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block w-8 border-t-2 border-violet" />
-                Optimised
               </span>
             </div>
           </div>
@@ -250,16 +286,16 @@ export default function ScenarioBuilder() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [client, setClient] = useState(null);
-  const [scenarios, setScenarios] = useState([]);
-  const [agentMemory, setAgentMemory] = useState([]);
-  const [count, setCount] = useState(3);
+  const [client, setClient]               = useState(null);
+  const [scenarios, setScenarios]         = useState([]);
+  const [agentMemory, setAgentMemory]     = useState([]);
+  const [count, setCount]                 = useState(3);
   const [extraInstruction, setExtraInstruction] = useState('');
-  const [generating, setGenerating] = useState(false);
-  const [progress, setProgress] = useState('');
-  const [error, setError] = useState('');
-  const [selectedIds, setSelectedIds] = useState(new Set());
-  const [expandedId, setExpandedId] = useState(null);
+  const [generating, setGenerating]       = useState(false);
+  const [progress, setProgress]           = useState('');
+  const [error, setError]                 = useState('');
+  const [selectedIds, setSelectedIds]     = useState(new Set());
+  const [expandedId, setExpandedId]       = useState(null);
   const [creatingReport, setCreatingReport] = useState(false);
 
   useEffect(() => {
@@ -270,10 +306,7 @@ export default function ScenarioBuilder() {
         sessionStorage.setItem(`client_name_${id}`, clientRes.data.name);
         const list = scenariosRes.data || [];
         setScenarios(list);
-        if (list.length > 0) {
-          // Use the most recent batch's agent_memory
-          setAgentMemory(list[0].agent_memory || []);
-        }
+        if (list.length > 0) setAgentMemory(list[0].agent_memory || []);
       } catch (err) {
         setError(err.response?.data?.detail || 'Failed to load page.');
       }
@@ -286,15 +319,14 @@ export default function ScenarioBuilder() {
     setError('');
     setProgress('Starting…');
     try {
-      const res = await startGenerateScenarios(id, count, extraInstruction.trim() || null);
+      const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null);
       const jobId = res.data.job_id;
       setProgress(`Claude is analysing the site (count=${count})…`);
-      // Poll until done
       const start = Date.now();
-      const poll = async () => {
+      const poll  = async () => {
         const elapsed = Math.floor((Date.now() - start) / 1000);
-        const jobRes = await getGenerationJob(jobId);
-        const job = jobRes.data;
+        const jobRes  = await getGenerationJob(jobId);
+        const job     = jobRes.data;
         if (job.status === 'done') {
           const newScenarios = job.scenarios || [];
           setScenarios((cur) => [...newScenarios, ...cur]);
@@ -323,11 +355,7 @@ export default function ScenarioBuilder() {
   const handleDelete = async (sid) => {
     await deleteScenario(sid);
     setScenarios((cur) => cur.filter((s) => s.id !== sid));
-    setSelectedIds((cur) => {
-      const next = new Set(cur);
-      next.delete(sid);
-      return next;
-    });
+    setSelectedIds((cur) => { const next = new Set(cur); next.delete(sid); return next; });
   };
 
   const handleClearAll = async () => {
@@ -347,10 +375,7 @@ export default function ScenarioBuilder() {
   };
 
   const handleCreateReport = async () => {
-    if (selectedIds.size === 0) {
-      setError('Select at least one scenario to add to a report.');
-      return;
-    }
+    if (selectedIds.size === 0) { setError('Select at least one scenario to add to a report.'); return; }
     setCreatingReport(true);
     try {
       const res = await createReport(id, {
@@ -383,7 +408,7 @@ export default function ScenarioBuilder() {
         <div>
           <h1 className="font-display text-5xl text-forest-900 leading-none">Load-shift scenarios.</h1>
           <p className="text-sm text-ink-soft mt-3 max-w-xl">
-            Claude analyses the site, simulates appliance-level changes, compares retailers, and saves each scenario to your database.
+            Claude analyses the site, simulates appliance-level changes, compares retailers, and saves each scenario.
           </p>
         </div>
       </div>
@@ -466,7 +491,6 @@ export default function ScenarioBuilder() {
             </div>
           )}
 
-          {/* Scenario list */}
           {scenarios.length === 0 && !generating && (
             <div className="border-2 border-dashed border-line rounded-2xl bg-cream-50 p-12 text-center">
               <div className="inline-flex items-center justify-center w-12 h-12 bg-lime/40 rounded-xl mb-4">

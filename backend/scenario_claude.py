@@ -278,20 +278,24 @@ def _tool_simulate_appliance_change(state: Dict[str, Any], inp: Dict[str, Any]) 
 
 PER_SCENARIO_SYSTEM = """You are an energy savings analyst. Generate ONE realistic load-shift scenario for this site.
 
-WORKFLOW:
-1. Call simulate_appliance_change one or more times to model the operational change.
-   The working curves persist across calls within this scenario.
-   Use scale, shift_window, or set_off actions on real appliances from the site.
-2. Call compare_retailers ONCE with the final shifted curve to find the best retailer.
-3. Call commit_scenario ONCE with the complete payload. After it returns, output exactly: DONE
+MANDATORY WORKFLOW — follow this exact sequence, no deviations:
+STEP 1: Call simulate_appliance_change at least once (you MUST do this — never skip it).
+         Pick a meaningful operational change for the site_type (e.g. shift HVAC pre-cooling,
+         reduce oven peak usage, shift dishwasher from peak to off-peak).
+         Use realistic factors: scale 0.5–0.9 for reductions, shift 30–50% of load from peak (buckets 30–42) to off-peak.
+STEP 2: Optionally call simulate_appliance_change again for a second appliance if it makes sense.
+STEP 3: Call compare_retailers ONCE with the final shifted curve from your last simulate_appliance_change result.
+STEP 4: Call commit_scenario ONCE with the complete payload.
 
-CONSTRAINTS:
-- Be SPECIFIC to the site_type. A cafe is not an office.
-- Buckets are 0–47 half-hourly (0=midnight, 30=3pm peak start, 42=9pm peak end).
-- For TOU sites, focus on moving load OUT of 30–42 (3pm–9pm peak).
-- savings_annual_high should be ≥ savings_annual_low. Use the compare_retailers delta plus the appliance simulation savings to estimate the range.
-- memory_bullets: 2–3 short insights about THIS site, plain text. Used as broker context, not generic advice.
-- Do not respond with markdown or commentary — only call tools."""
+RULES:
+- You MUST call simulate_appliance_change before commit_scenario. If you skip it, the scenario will have 0 savings and be discarded.
+- savings_annual_low and savings_annual_high MUST both be > 0 (based on the annual_saving_on_current_tariff from simulate + retailer delta).
+- savings_annual_high >= savings_annual_low.
+- Buckets: 0–47 half-hourly (bucket 0=midnight, 16=8am, 30=3pm peak start, 42=9pm peak end).
+- For TOU tariffs: focus on shifting load OUT of peak window buckets 30–42.
+- Be SPECIFIC to the site_type: a cafe has espresso machines and ovens; an office has HVAC and lighting; etc.
+- memory_bullets: 2–3 plain-English insights specific to THIS site. Not generic advice.
+- Do NOT respond with plain text or markdown. Only call the tools."""
 
 
 def _build_user_message_one(
@@ -426,8 +430,16 @@ def _generate_one(
                     elif fname == "simulate_appliance_change":
                         out = _tool_simulate_appliance_change(state, args)
                     elif fname == "commit_scenario":
-                        committed = args
-                        out = {"committed": True}
+                        if not state.get("sim_history"):
+                            out = {
+                                "error": (
+                                    "You must call simulate_appliance_change at least once before commit_scenario. "
+                                    "Go back to STEP 1 and simulate a real appliance change first."
+                                )
+                            }
+                        else:
+                            committed = args
+                            out = {"committed": True}
                     else:
                         out = {"error": f"unknown tool {fname}"}
                 except Exception as exc:  # noqa: BLE001
