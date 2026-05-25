@@ -56,7 +56,7 @@ export default function ClientList() {
 
   const handleCardClick = (client) => {
     if (client.has_interval_data && client.has_tariff) {
-      navigate(`/clients/${client.id}/baseline`);
+      navigate(`/clients/${client.id}/portfolio`);
     } else {
       navigate(`/clients/${client.id}/setup`);
     }

@@ -3,6 +3,7 @@ In-memory data store with JSON file persistence for the energy broker API.
 
 Keys:
   clients         : dict[str, dict]   — client objects keyed by client_id
+  stores          : dict[str, dict]   — store objects keyed by store_id
   interval_data   : dict[str, list]   — client_id → [{timestamp, kwh}, ...]
   tariffs         : dict[str, dict]   — tariff objects keyed by tariff_id
   client_tariffs  : dict[str, str]    — client_id → tariff_id
@@ -22,17 +23,18 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), "data_store.json")
 # ── In-memory stores ─────────────────────────────────────────────────────────
 
 clients: dict = {}
+stores: dict = {}           # store_id → store object (each has client_id)
 interval_data: dict = {}
 tariffs: dict = {}
 client_tariffs: dict = {}
-scenarios: dict = {}   # scenario_id → full scenario payload
-reports: dict = {}     # report_id → saved report
+scenarios: dict = {}
+reports: dict = {}
 
 
 # ── Persistence ──────────────────────────────────────────────────────────────
 
 def load_from_disk() -> None:
-    global clients, interval_data, tariffs, client_tariffs, scenarios, reports
+    global clients, stores, interval_data, tariffs, client_tariffs, scenarios, reports
     if not os.path.exists(DATA_FILE):
         logger.info("data_store.json not found — starting fresh, seeding retailer tariffs")
         _seed_tariffs()
@@ -42,6 +44,7 @@ def load_from_disk() -> None:
         with open(DATA_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         clients = data.get("clients", {})
+        stores = data.get("stores", {})
         interval_data = data.get("interval_data", {})
         tariffs = data.get("tariffs", {})
         client_tariffs = data.get("client_tariffs", {})
@@ -51,12 +54,13 @@ def load_from_disk() -> None:
             _seed_tariffs()
             save_to_disk()
         logger.info(
-            "Loaded: %d clients, %d tariffs, %d scenarios, %d reports",
-            len(clients), len(tariffs), len(scenarios), len(reports),
+            "Loaded: %d clients, %d stores, %d tariffs, %d scenarios, %d reports",
+            len(clients), len(stores), len(tariffs), len(scenarios), len(reports),
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to load data_store.json: %s — resetting", exc)
         clients = {}
+        stores = {}
         interval_data = {}
         tariffs = {}
         client_tariffs = {}
@@ -71,6 +75,7 @@ def save_to_disk() -> None:
         with open(DATA_FILE, "w", encoding="utf-8") as fh:
             json.dump({
                 "clients": clients,
+                "stores": stores,
                 "interval_data": interval_data,
                 "tariffs": tariffs,
                 "client_tariffs": client_tariffs,
@@ -81,10 +86,8 @@ def save_to_disk() -> None:
         logger.error("Failed to save data_store.json: %s", exc)
 
 
-# ── Retailer tariff library (negotiation reference + selectable) ─────────────
+# ── Retailer tariff library ───────────────────────────────────────────────────
 
-# These are the canonical 5 AU retailers used for negotiation comparison
-# (also exposed via GET /api/tariffs so brokers can assign them).
 RETAILER_TARIFFS = [
     {
         "id": "tariff-agl-tou-vic",
@@ -150,10 +153,67 @@ RETAILER_TARIFFS = [
 
 
 def _seed_tariffs() -> None:
-    """Pre-populate the retailer comparison set."""
     for t in RETAILER_TARIFFS:
         tariffs[t["id"]] = t
     logger.info("Seeded %d retailer tariffs", len(tariffs))
+
+
+# ── Demo stores for Brunswick East Cafe chain ─────────────────────────────────
+
+DEMO_STORES = [
+    {
+        "id": "store-001",
+        "client_id": "client-demo-001",
+        "name": "Brunswick East",
+        "address": "142 Lygon St, Brunswick East VIC 3057",
+        "site_type": "cafe",
+        "nmi": "6305987412",
+        "annual_kwh": 24800.0,
+        "annual_cost": 9143.0,
+        "status": "active",
+    },
+    {
+        "id": "store-002",
+        "client_id": "client-demo-001",
+        "name": "Fitzroy North",
+        "address": "87 St Georges Rd, Fitzroy North VIC 3068",
+        "site_type": "cafe",
+        "nmi": "6305874123",
+        "annual_kwh": 19200.0,
+        "annual_cost": 7081.0,
+        "status": "active",
+    },
+    {
+        "id": "store-003",
+        "client_id": "client-demo-001",
+        "name": "Carlton",
+        "address": "215 Rathdowne St, Carlton VIC 3053",
+        "site_type": "retail",
+        "nmi": "6305741289",
+        "annual_kwh": 34500.0,
+        "annual_cost": 12718.0,
+        "status": "active",
+    },
+    {
+        "id": "store-004",
+        "client_id": "client-demo-001",
+        "name": "Northcote",
+        "address": "52 High St, Northcote VIC 3070",
+        "site_type": "office",
+        "nmi": "6305698741",
+        "annual_kwh": 28100.0,
+        "annual_cost": 10362.0,
+        "status": "active",
+    },
+]
+
+
+def seed_demo_stores() -> None:
+    """Seed demo stores for the demo client. Idempotent."""
+    for s in DEMO_STORES:
+        stores[s["id"]] = s
+    save_to_disk()
+    logger.info("Seeded %d demo stores", len(DEMO_STORES))
 
 
 # ── Demo client (synthetic cafe with 17,520 half-hourly intervals) ──────────
@@ -198,10 +258,7 @@ def _generate_synthetic_intervals(start_year: int = 2024) -> list:
 
 
 def seed_demo_client() -> None:
-    """Seed a fully built-out demo client with interval data and tariff.
-    Does NOT seed any scenarios or reports — those start empty.
-    Idempotent: skips if demo client already exists.
-    """
+    """Seed a fully built-out demo client. Idempotent."""
     demo_id = "client-demo-001"
     if demo_id in clients:
         return
@@ -224,5 +281,6 @@ def seed_demo_client() -> None:
         "annual_cost": None,
     }
     client_tariffs[demo_id] = "tariff-agl-tou-vic"
+    seed_demo_stores()
     save_to_disk()
     logger.info("Seeded demo client %s with %d intervals", demo_id, len(intervals))

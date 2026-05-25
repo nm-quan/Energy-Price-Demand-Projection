@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Check, ChevronDown, ChevronUp,
+  Layers, Store,
 } from 'lucide-react';
 import {
   getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
@@ -265,8 +266,14 @@ export default function ScenarioBuilder() {
   const [selectedIds,      setSelectedIds]      = useState(new Set());
   const [expandedId,       setExpandedId]       = useState(null);
   const [creatingReport,   setCreatingReport]   = useState(false);
+  const [storeContext,     setStoreContext]      = useState(null);
 
   useEffect(() => {
+    // Pick up any store context passed from baseline page
+    const raw = sessionStorage.getItem(`scenario_store_context_${id}`);
+    const ctx = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+    if (ctx) setStoreContext(ctx);
+
     (async () => {
       try {
         const [clientRes, scenariosRes] = await Promise.all([getClient(id), listScenarios(id)]);
@@ -284,7 +291,8 @@ export default function ScenarioBuilder() {
     setError('');
     setProgress('Starting…');
     try {
-      const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null);
+      const aggStoreIds = storeContext?.store_ids?.length > 0 ? storeContext.store_ids : null;
+      const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null, aggStoreIds);
       const jobId = res.data.job_id;
       setProgress(`Claude is analysing the site (count=${count})…`);
       const start = Date.now();
@@ -438,6 +446,34 @@ export default function ScenarioBuilder() {
               ))}
             </div>
           </div>
+
+          {/* Store context banner */}
+          {storeContext && (
+            <div className={`flex items-center gap-3 rounded-xl px-4 py-3 border text-sm ${
+              storeContext.type === 'aggregate'
+                ? 'bg-violet/8 border-violet/30 text-violet-900'
+                : 'bg-forest-50 border-forest-200 text-forest-900'
+            }`}>
+              {storeContext.type === 'aggregate'
+                ? <Layers size={15} className="text-violet flex-shrink-0" />
+                : <Store size={15} className="text-forest-700 flex-shrink-0" />}
+              <span>
+                {storeContext.type === 'aggregate' ? (
+                  <><span className="font-semibold">Aggregate view</span> — {storeContext.store_names.join(' + ')}</>
+                ) : (
+                  <><span className="font-semibold">Single store</span> — {storeContext.store_names[0]}</>
+                )}
+                <span className="text-ink-mute ml-2">· Scenarios will use this load profile</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => { sessionStorage.removeItem(`scenario_store_context_${id}`); setStoreContext(null); }}
+                className="ml-auto text-[11px] text-ink-mute hover:text-red-600 underline"
+              >
+                Clear
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">

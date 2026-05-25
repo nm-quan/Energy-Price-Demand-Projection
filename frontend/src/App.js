@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams, Link } 
 
 import ClientList from './pages/ClientList';
 import ClientSetup from './pages/ClientSetup';
+import StorePortfolio from './pages/StorePortfolio';
 import BaselineAnalysis from './pages/BaselineAnalysis';
 import ScenarioBuilder from './pages/ScenarioBuilder';
 import Report from './pages/Report';
@@ -50,6 +51,12 @@ function Sidebar({ clientId, clientName }) {
               {clientName || 'Current Client'}
             </p>
             <div className="mt-1 space-y-1">
+              <NavItem
+                to={`/clients/${clientId}/portfolio`}
+                label="Portfolio"
+                active={isActive(`/clients/${clientId}/portfolio`)}
+                testId="sidebar-nav-portfolio"
+              />
               <NavItem
                 to={`/clients/${clientId}/baseline`}
                 label="Baseline"
@@ -107,6 +114,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/clients" replace />} />
         <Route path="/clients" element={<AppLayoutWrapper><ClientList /></AppLayoutWrapper>} />
         <Route path="/clients/new" element={<AppLayoutWrapper><ClientSetup /></AppLayoutWrapper>} />
+        <Route path="/clients/:id/portfolio" element={<AppLayoutWrapper><StorePortfolio /></AppLayoutWrapper>} />
         <Route path="/clients/:id/baseline" element={<AppLayoutWrapper><BaselineAnalysis /></AppLayoutWrapper>} />
         <Route path="/clients/:id/scenarios" element={<AppLayoutWrapper><ScenarioBuilder /></AppLayoutWrapper>} />
         <Route path="/clients/:id/report" element={<AppLayoutWrapper><Report /></AppLayoutWrapper>} />

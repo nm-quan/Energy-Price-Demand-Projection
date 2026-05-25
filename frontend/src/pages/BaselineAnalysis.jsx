@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, ArrowRight, AlertCircle } from 'lucide-react';
+import { ChevronRight, ArrowRight, AlertCircle, Layers, Store } from 'lucide-react';
 import { getBaseline, getClient, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import RetailerTable from '../components/RetailerTable';
@@ -55,14 +55,9 @@ function CostStackChart({ costStack }) {
           <div key={item.key} className="flex items-center gap-3">
             <div className="w-32 text-right text-xs text-ink-soft flex-shrink-0">{COST_LABELS[item.key]}</div>
             <div className="flex-1 bg-cream-200 rounded-full h-4 relative overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.9 }}
-              />
+              <div className="h-full rounded-full transition-all" style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.9 }} />
             </div>
-            <div className="w-20 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">
-              {fmtCurrency(item.value)}
-            </div>
+            <div className="w-20 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">{fmtCurrency(item.value)}</div>
             <div className="w-10 text-right text-[11px] text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
           </div>
         );
@@ -101,13 +96,31 @@ export default function BaselineAnalysis() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [client,   setClient]   = useState(null);
-  const [baseline, setBaseline] = useState(null);
-  const [loading,  setLoading]  = useState(true);
-  const [error,    setError]    = useState('');
+  const [client,      setClient]   = useState(null);
+  const [baseline,    setBaseline] = useState(null);
+  const [loading,     setLoading]  = useState(true);
+  const [error,       setError]    = useState('');
+  const [storeContext, setStoreContext] = useState(null); // {type, store_ids, store_names, baseline}
 
   useEffect(() => {
     if (!id) return;
+
+    // Check if we arrived from the store portfolio with a pre-loaded context
+    const raw = sessionStorage.getItem(`store_context_${id}`);
+    const ctx = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+
+    if (ctx?.baseline) {
+      setStoreContext(ctx);
+      setBaseline(ctx.baseline);
+      setLoading(false);
+      // Still fetch client name
+      getClient(id).then((r) => {
+        setClient(r.data);
+        sessionStorage.setItem(`client_name_${id}`, r.data.name);
+      }).catch(() => {});
+      return;
+    }
+
     (async () => {
       setLoading(true);
       setError('');
@@ -124,10 +137,19 @@ export default function BaselineAnalysis() {
     })();
   }, [id]);
 
+  const handleBuildScenarios = () => {
+    // Pass store context to scenarios page via sessionStorage
+    if (storeContext) {
+      sessionStorage.setItem(`scenario_store_context_${id}`, JSON.stringify(storeContext));
+    } else {
+      sessionStorage.removeItem(`scenario_store_context_${id}`);
+    }
+    navigate(`/clients/${id}/scenarios`);
+  };
+
   const metrics      = baseline?.shape_metrics   || {};
   const costStack    = baseline?.cost_stack       || {};
   const appCurves    = baseline?.appliance_curves || {};
-  const loadCurve    = baseline?.load_curve       || [];
   const retailerComp = baseline?.retailer_comparison;
 
   const activeAppliances = APPLIANCE_LAYERS.filter(
@@ -136,15 +158,65 @@ export default function BaselineAnalysis() {
 
   return (
     <div className="p-10 max-w-7xl" data-testid="baseline-page">
+      {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.15em] text-ink-mute mb-3">
         <Link to="/clients" className="hover:text-forest-700">Clients</Link>
+        <ChevronRight size={12} />
+        {client && (
+          <Link to={`/clients/${id}/portfolio`} className="hover:text-forest-700 text-forest-800 font-medium">
+            {client.name}
+          </Link>
+        )}
         <ChevronRight size={12} />
         <span className="text-violet font-medium">Baseline</span>
       </div>
 
       {client && (
-        <div className="mb-8">
+        <div className="mb-6">
           <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
+        </div>
+      )}
+
+      {/* Store context banner */}
+      {storeContext && (
+        <div className={`flex items-center gap-3 rounded-xl px-4 py-3 mb-6 border text-sm ${
+          storeContext.type === 'aggregate'
+            ? 'bg-violet/8 border-violet/30 text-violet-900'
+            : 'bg-forest-50 border-forest-200 text-forest-900'
+        }`}>
+          {storeContext.type === 'aggregate'
+            ? <Layers size={15} className="text-violet flex-shrink-0" />
+            : <Store size={15} className="text-forest-700 flex-shrink-0" />}
+          <span>
+            {storeContext.type === 'aggregate' ? (
+              <>
+                <span className="font-semibold">Aggregate view</span>
+                {' — '}
+                {storeContext.store_names.join(' + ')}
+              </>
+            ) : (
+              <>
+                <span className="font-semibold">Single store</span>
+                {' — '}
+                {storeContext.store_names[0]}
+              </>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              sessionStorage.removeItem(`store_context_${id}`);
+              setStoreContext(null);
+              setLoading(true);
+              Promise.all([getClient(id), getBaseline(id)]).then(([c, b]) => {
+                setClient(c.data);
+                setBaseline(b.data);
+              }).finally(() => setLoading(false));
+            }}
+            className="ml-auto text-[11px] text-ink-mute hover:text-red-600 underline"
+          >
+            Clear
+          </button>
         </div>
       )}
 
@@ -180,7 +252,6 @@ export default function BaselineAnalysis() {
                   testId="baseline-stacked-chart"
                 />
 
-                {/* Static appliance legend */}
                 {activeAppliances.length > 0 && (
                   <div className="mt-4 pt-4 border-t border-line">
                     <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-3">Appliances</p>
@@ -200,10 +271,10 @@ export default function BaselineAnalysis() {
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <MetricCard label="Load Factor"      value={fmtPct(metrics.load_factor     || 0, 0)} hint="Avg ÷ peak"     accent="forest" testId="metric-load-factor" />
-                <MetricCard label="Peak Demand"      value={fmtNumber(metrics.peak_kw      || 0, 1)} unit="kW"            accent="amber"  testId="metric-peak-kw" />
-                <MetricCard label="Peak Coincidence" value={fmtPct(metrics.peak_coincidence|| 0, 0)} hint="Load in 3–9pm" accent="red"    testId="metric-peak-coincidence" />
-                <MetricCard label="Annual"           value={fmtNumber((metrics.annual_kwh  || 0) / 1000, 1)} unit="MWh"  accent="violet" testId="metric-annual-kwh" />
+                <MetricCard label="Load Factor"      value={fmtPct(metrics.load_factor      || 0, 0)} hint="Avg ÷ peak"     accent="forest" testId="metric-load-factor" />
+                <MetricCard label="Peak Demand"      value={fmtNumber(metrics.peak_kw       || 0, 1)} unit="kW"            accent="amber"  testId="metric-peak-kw" />
+                <MetricCard label="Peak Coincidence" value={fmtPct(metrics.peak_coincidence || 0, 0)} hint="Load in 3–9pm" accent="red"    testId="metric-peak-coincidence" />
+                <MetricCard label="Annual"           value={fmtNumber((metrics.annual_kwh   || 0) / 1000, 1)} unit="MWh"  accent="violet" testId="metric-annual-kwh" />
               </div>
             </div>
 
@@ -230,7 +301,7 @@ export default function BaselineAnalysis() {
 
           <div className="mt-8 flex justify-end">
             <button
-              onClick={() => navigate(`/clients/${id}/scenarios`)}
+              onClick={handleBuildScenarios}
               data-testid="build-scenarios-btn"
               className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-6 py-3 text-sm transition-all"
             >

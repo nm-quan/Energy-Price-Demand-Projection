@@ -78,6 +78,7 @@ SYNTHETIC_PROFILES: Dict[str, List[float]] = {
         2.1, 1.5, 1.0, 0.8, 0.7,
         0.6, 0.5, 0.5, 0.5, 0.5, 0.5,
         0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+        0.5, 0.5, 0.5, 0.5,
     ],
     "industrial": [
         8.5, 7.2, 6.8, 6.5, 6.8, 7.2,
@@ -117,7 +118,7 @@ def _get_synthetic_profile(site_type: str) -> List[float]:
     return list(profile)
 
 
-# ── Appliance split (used for stacked chart + Claude tools) ──────────────────
+# ── Appliance split ───────────────────────────────────────────────────────────
 
 APPLIANCE_WEIGHTS: Dict[str, Dict[str, float]] = {
     "cafe": {"Fridges": 0.22, "Espresso": 0.12, "Ovens": 0.18, "HVAC": 0.20, "Lighting": 0.08, "Dishwasher": 0.08, "Hot Water": 0.07, "Misc": 0.05},
@@ -133,7 +134,7 @@ def _split_appliance_curves(load_curve: List[float], site_type: str) -> Dict[str
     return {name: [round(load_curve[b] * w, 4) for b in range(len(load_curve))] for name, w in weights.items()}
 
 
-# ── App ─────────────────────────────────────────────────────────────────────
+# ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Energy Broker API", version="2.0.0")
 
@@ -152,19 +153,24 @@ def startup_event():
     if not data_store.clients:
         logger.info("No clients found — seeding synthetic demo client")
         data_store.seed_demo_client()
-    logger.info("Data store loaded — %d clients, %d tariffs, %d scenarios, %d reports",
-                len(data_store.clients), len(data_store.tariffs),
+    # Seed demo stores if the demo client exists but has no stores yet
+    demo_has_stores = any(v.get("client_id") == "client-demo-001" for v in data_store.stores.values())
+    if "client-demo-001" in data_store.clients and not demo_has_stores:
+        logger.info("Seeding demo stores for client-demo-001")
+        data_store.seed_demo_stores()
+    logger.info("Data store loaded — %d clients, %d stores, %d tariffs, %d scenarios, %d reports",
+                len(data_store.clients), len(data_store.stores), len(data_store.tariffs),
                 len(data_store.scenarios), len(data_store.reports))
 
 
-# ── Health ──────────────────────────────────────────────────────────────────
+# ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "claude": _has_api_key()}
 
 
-# ── Clients ─────────────────────────────────────────────────────────────────
+# ── Clients ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/clients")
 def list_clients():
@@ -209,7 +215,8 @@ def delete_client(client_id: str):
     data_store.clients.pop(client_id, None)
     data_store.interval_data.pop(client_id, None)
     data_store.client_tariffs.pop(client_id, None)
-    # Remove related scenarios + reports
+    for sid in [k for k, v in data_store.stores.items() if v.get("client_id") == client_id]:
+        data_store.stores.pop(sid, None)
     for sid in [k for k, v in data_store.scenarios.items() if v.get("client_id") == client_id]:
         data_store.scenarios.pop(sid, None)
     for rid in [k for k, v in data_store.reports.items() if v.get("client_id") == client_id]:
@@ -218,7 +225,123 @@ def delete_client(client_id: str):
     return {"deleted": True}
 
 
-# ── Interval data ───────────────────────────────────────────────────────────
+# ── Stores ───────────────────────────────────────────────────────────────────
+
+class StoreCreate(BaseModel):
+    name: str
+    address: Optional[str] = None
+    site_type: str = "cafe"
+    nmi: Optional[str] = None
+    annual_kwh: Optional[float] = None
+
+
+@app.get("/api/clients/{client_id}/stores")
+def list_stores(client_id: str):
+    if client_id not in data_store.clients:
+        raise HTTPException(status_code=404, detail="Client not found")
+    items = [v for v in data_store.stores.values() if v.get("client_id") == client_id]
+    items.sort(key=lambda s: s.get("name", ""))
+    return items
+
+
+@app.post("/api/clients/{client_id}/stores", status_code=201)
+def create_store(client_id: str, body: StoreCreate):
+    if client_id not in data_store.clients:
+        raise HTTPException(status_code=404, detail="Client not found")
+    store_id = f"store-{uuid.uuid4().hex[:8]}"
+    store = {
+        "id": store_id,
+        "client_id": client_id,
+        "name": body.name,
+        "address": body.address,
+        "site_type": body.site_type,
+        "nmi": body.nmi,
+        "annual_kwh": body.annual_kwh,
+        "annual_cost": None,
+        "status": "active",
+    }
+    data_store.stores[store_id] = store
+    data_store.save_to_disk()
+    return store
+
+
+@app.delete("/api/clients/{client_id}/stores/{store_id}")
+def delete_store(client_id: str, store_id: str):
+    store = data_store.stores.get(store_id)
+    if store is None or store.get("client_id") != client_id:
+        raise HTTPException(status_code=404, detail="Store not found")
+    data_store.stores.pop(store_id)
+    data_store.save_to_disk()
+    return {"deleted": True}
+
+
+def _get_store_load_curve(store: dict) -> tuple[List[float], float]:
+    """Return (load_curve_48, annual_kwh) for a store using its synthetic profile scaled to annual_kwh."""
+    profile = _get_synthetic_profile(store.get("site_type", "cafe"))
+    annual_kwh = store.get("annual_kwh")
+    if annual_kwh and annual_kwh > 0:
+        raw_annual = sum(v * 0.5 for v in profile) * 365.0
+        if raw_annual > 0:
+            scale = annual_kwh / raw_annual
+            profile = [round(v * scale, 4) for v in profile]
+        return profile, float(annual_kwh)
+    daily_kwh = sum(v * 0.5 for v in profile)
+    return profile, daily_kwh * 365.0
+
+
+@app.get("/api/clients/{client_id}/stores/{store_id}/baseline")
+def get_store_baseline(client_id: str, store_id: str):
+    if client_id not in data_store.clients:
+        raise HTTPException(status_code=404, detail="Client not found")
+    store = data_store.stores.get(store_id)
+    if store is None or store.get("client_id") != client_id:
+        raise HTTPException(status_code=404, detail="Store not found")
+    tariff = _resolve_tariff(client_id)
+    load_curve, annual_kwh = _get_store_load_curve(store)
+    result = compute_baseline(load_curve, tariff, annual_kwh)
+    result["appliance_curves"] = _split_appliance_curves(load_curve, store.get("site_type", "cafe"))
+    result["retailer_comparison"] = compute_retailer_comparison(load_curve, annual_kwh, tariff)
+    store["annual_cost"] = result["cost_stack"]["total_annual"]
+    data_store.stores[store_id] = store
+    data_store.save_to_disk()
+    return result
+
+
+class AggregateBaselineRequest(BaseModel):
+    store_ids: List[str]
+
+
+@app.post("/api/clients/{client_id}/stores/aggregate-baseline")
+def get_aggregate_baseline(client_id: str, body: AggregateBaselineRequest):
+    """Sum load curves of selected stores and compute an aggregate baseline."""
+    if client_id not in data_store.clients:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not body.store_ids:
+        raise HTTPException(status_code=400, detail="store_ids must not be empty")
+
+    load_curves: List[List[float]] = []
+    total_annual_kwh = 0.0
+    dominant_site_type = "cafe"
+
+    for sid in body.store_ids:
+        store = data_store.stores.get(sid)
+        if store is None or store.get("client_id") != client_id:
+            raise HTTPException(status_code=404, detail=f"Store {sid} not found for this client")
+        lc, akwh = _get_store_load_curve(store)
+        load_curves.append(lc)
+        total_annual_kwh += akwh
+        dominant_site_type = store.get("site_type", dominant_site_type)
+
+    agg_curve = [round(sum(lc[i] for lc in load_curves), 4) for i in range(48)]
+    tariff = _resolve_tariff(client_id)
+    result = compute_baseline(agg_curve, tariff, total_annual_kwh)
+    result["appliance_curves"] = _split_appliance_curves(agg_curve, dominant_site_type)
+    result["retailer_comparison"] = compute_retailer_comparison(agg_curve, total_annual_kwh, tariff)
+    result["aggregate_store_ids"] = body.store_ids
+    return result
+
+
+# ── Interval data ─────────────────────────────────────────────────────────────
 
 @app.post("/api/clients/{client_id}/upload")
 async def upload_intervals(client_id: str, file: UploadFile = File(...)):
@@ -264,7 +387,7 @@ def intervals_summary(client_id: str):
     }
 
 
-# ── Tariffs ─────────────────────────────────────────────────────────────────
+# ── Tariffs ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/tariffs")
 def list_tariffs():
@@ -295,7 +418,7 @@ def assign_tariff(client_id: str, body: TariffAssign):
     return {"success": True}
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_client_load_curve(client_id: str, client: dict) -> tuple[List[float], float]:
     intervals = data_store.interval_data.get(client_id)
@@ -327,7 +450,7 @@ def _resolve_tariff(client_id: str) -> Tariff:
     return t
 
 
-# ── Baseline ────────────────────────────────────────────────────────────────
+# ── Baseline ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/clients/{client_id}/baseline")
 def get_baseline(client_id: str):
@@ -353,45 +476,46 @@ class BaselineRecalcRequest(BaseModel):
 
 @app.post("/api/clients/{client_id}/baseline/recalc")
 def recalc_baseline(client_id: str, body: BaselineRecalcRequest):
-    """Recompute baseline with appliance scale overrides (e.g. {'HVAC': 0.7})."""
     client = data_store.clients.get(client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
     tariff = _resolve_tariff(client_id)
     load_curve, annual_kwh = _get_client_load_curve(client_id, client)
     appliance_curves = _split_appliance_curves(load_curve, client.get("site_type", "office"))
-
     scales = body.scales or {}
     scaled_curves: Dict[str, List[float]] = {}
     for name, curve in appliance_curves.items():
         factor = float(scales.get(name, 1.0))
         scaled_curves[name] = [round(v * factor, 4) for v in curve]
-
     new_load = [0.0] * 48
     for curve in scaled_curves.values():
         for i, v in enumerate(curve):
             new_load[i] += v
     new_load = [round(v, 4) for v in new_load]
-
     base_sum = sum(load_curve)
     new_sum = sum(new_load)
     new_annual_kwh = annual_kwh * (new_sum / base_sum) if base_sum > 0 else annual_kwh
-
     result = compute_baseline(new_load, tariff, new_annual_kwh)
     result["appliance_curves"] = scaled_curves
     result["retailer_comparison"] = compute_retailer_comparison(new_load, new_annual_kwh, tariff)
     return result
 
 
-# ── Scenarios ───────────────────────────────────────────────────────────────
+# ── Scenarios ────────────────────────────────────────────────────────────────
 
 class GenerateScenariosRequest(BaseModel):
     count: int = 3
     extra_instruction: Optional[str] = None
+    aggregate_store_ids: Optional[List[str]] = None
 
 
-def _run_generation_job(job_id: str, client_id: str, count: int, extra_instruction: Optional[str]) -> None:
-    """Background worker for /scenarios/generate. Writes scenarios into the store on success."""
+def _run_generation_job(
+    job_id: str,
+    client_id: str,
+    count: int,
+    extra_instruction: Optional[str],
+    aggregate_store_ids: Optional[List[str]] = None,
+) -> None:
     try:
         client = data_store.clients.get(client_id)
         if client is None:
@@ -400,9 +524,31 @@ def _run_generation_job(job_id: str, client_id: str, count: int, extra_instructi
             return
 
         tariff = _resolve_tariff(client_id)
-        load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+
+        # Use aggregated store load curves if provided
+        if aggregate_store_ids:
+            load_curves = []
+            total_kwh = 0.0
+            dominant_type = client.get("site_type", "cafe")
+            for sid in aggregate_store_ids:
+                store = data_store.stores.get(sid)
+                if store and store.get("client_id") == client_id:
+                    lc, akwh = _get_store_load_curve(store)
+                    load_curves.append(lc)
+                    total_kwh += akwh
+                    dominant_type = store.get("site_type", dominant_type)
+            if load_curves:
+                load_curve = [round(sum(lc[i] for lc in load_curves), 4) for i in range(48)]
+                annual_kwh = total_kwh
+            else:
+                load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+                dominant_type = client.get("site_type", "cafe")
+        else:
+            load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+            dominant_type = client.get("site_type", "cafe")
+
         baseline = compute_baseline(load_curve, tariff, annual_kwh)
-        appliance_curves = _split_appliance_curves(load_curve, client.get("site_type", "office"))
+        appliance_curves = _split_appliance_curves(load_curve, dominant_type)
         baseline["load_curve"] = load_curve
 
         result = generate_scenarios(
@@ -415,7 +561,6 @@ def _run_generation_job(job_id: str, client_id: str, count: int, extra_instructi
             extra_instruction=extra_instruction,
         )
 
-        # Guard: if client was deleted while we were running, abort persist
         if client_id not in data_store.clients:
             with JOBS_LOCK:
                 JOBS[job_id] = {**JOBS.get(job_id, {}), "status": "error", "error": "Client deleted during generation"}
@@ -431,7 +576,7 @@ def _run_generation_job(job_id: str, client_id: str, count: int, extra_instructi
                 "created_at": now,
                 "baseline_curve": [round(v, 4) for v in load_curve],
                 "baseline_appliance_curves": appliance_curves,
-                "agent_memory": result.get("agent_memory", []),
+                "aggregate_store_ids": aggregate_store_ids,
                 "extra_instruction": extra_instruction,
                 **s,
             }
@@ -444,7 +589,6 @@ def _run_generation_job(job_id: str, client_id: str, count: int, extra_instructi
                 **JOBS.get(job_id, {}),
                 "status": "done",
                 "scenarios": [data_store.scenarios[sid] for sid in stored_ids],
-                "agent_memory": result.get("agent_memory", []),
                 "source": result.get("source", "claude"),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -456,14 +600,12 @@ def _run_generation_job(job_id: str, client_id: str, count: int, extra_instructi
 
 @app.post("/api/clients/{client_id}/scenarios/generate", status_code=202)
 def start_generate_job(client_id: str, body: GenerateScenariosRequest):
-    """Kick off scenario generation in the background. Returns a job_id to poll."""
     client = data_store.clients.get(client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
     if not _has_api_key():
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
     count = max(1, min(10, int(body.count or 3)))
-
     job_id = f"job-{uuid.uuid4().hex[:10]}"
     with JOBS_LOCK:
         JOBS[job_id] = {
@@ -475,7 +617,7 @@ def start_generate_job(client_id: str, body: GenerateScenariosRequest):
         }
     thread = threading.Thread(
         target=_run_generation_job,
-        args=(job_id, client_id, count, body.extra_instruction),
+        args=(job_id, client_id, count, body.extra_instruction, body.aggregate_store_ids),
         daemon=True,
     )
     thread.start()
@@ -520,7 +662,7 @@ def clear_client_scenarios(client_id: str):
     return {"deleted": len(ids)}
 
 
-# ── Reports ─────────────────────────────────────────────────────────────────
+# ── Reports ──────────────────────────────────────────────────────────────────
 
 class ReportCreate(BaseModel):
     title: Optional[str] = None
@@ -534,19 +676,16 @@ def create_report(client_id: str, body: ReportCreate):
         raise HTTPException(status_code=404, detail="Client not found")
     if not body.scenario_ids:
         raise HTTPException(status_code=400, detail="scenario_ids must contain at least one id")
-
     scenarios = []
     for sid in body.scenario_ids:
         scn = data_store.scenarios.get(sid)
         if scn is None or scn.get("client_id") != client_id:
             raise HTTPException(status_code=404, detail=f"Scenario {sid} not found for this client")
         scenarios.append(scn)
-
     tariff = _resolve_tariff(client_id)
     load_curve, annual_kwh = _get_client_load_curve(client_id, client)
     baseline = compute_baseline(load_curve, tariff, annual_kwh)
     baseline["appliance_curves"] = _split_appliance_curves(load_curve, client.get("site_type", "office"))
-
     rid = f"rpt-{uuid.uuid4().hex[:8]}"
     title = body.title or f"{client.get('name')} — Energy Analysis"
     report = {
@@ -595,7 +734,7 @@ def delete_report(report_id: str):
     return {"deleted": True}
 
 
-# ── Static frontend (production) ─────────────────────────────────────────────
+# ── Static frontend (production) ──────────────────────────────────────────────
 
 import os as _os
 

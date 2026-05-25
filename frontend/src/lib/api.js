@@ -13,6 +13,14 @@ export const createClient = (data) => api.post('/api/clients', data);
 export const getClient = (id) => api.get(`/api/clients/${id}`);
 export const deleteClient = (id) => api.delete(`/api/clients/${id}`);
 
+// Stores
+export const listStores = (clientId) => api.get(`/api/clients/${clientId}/stores`);
+export const createStore = (clientId, data) => api.post(`/api/clients/${clientId}/stores`, data);
+export const deleteStore = (clientId, storeId) => api.delete(`/api/clients/${clientId}/stores/${storeId}`);
+export const getStoreBaseline = (clientId, storeId) => api.get(`/api/clients/${clientId}/stores/${storeId}/baseline`);
+export const getAggregateBaseline = (clientId, storeIds) =>
+  api.post(`/api/clients/${clientId}/stores/aggregate-baseline`, { store_ids: storeIds });
+
 // Intervals
 export const uploadIntervalData = (id, file) => {
   const fd = new FormData();
@@ -31,10 +39,11 @@ export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
 export const recalcBaseline = (id, scales) => api.post(`/api/clients/${id}/baseline/recalc`, { scales });
 
 // Scenarios
-export const startGenerateScenarios = (id, count, extraInstruction = null) =>
+export const startGenerateScenarios = (id, count, extraInstruction = null, aggregateStoreIds = null) =>
   api.post(`/api/clients/${id}/scenarios/generate`, {
     count,
     extra_instruction: extraInstruction,
+    aggregate_store_ids: aggregateStoreIds,
   });
 export const getGenerationJob = (jobId) => api.get(`/api/scenarios/jobs/${jobId}`);
 export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
