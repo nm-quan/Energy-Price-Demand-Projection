@@ -18,7 +18,10 @@ import os
 
 logger = logging.getLogger("data_store")
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "data_store.json")
+DATA_FILE = os.path.join(
+    os.environ.get("DATA_DIR", os.path.dirname(__file__)),
+    "data_store.json",
+)
 
 # ── In-memory stores ─────────────────────────────────────────────────────────
 
