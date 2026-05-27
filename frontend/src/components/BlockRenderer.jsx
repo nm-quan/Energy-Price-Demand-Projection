@@ -326,6 +326,178 @@ function RecommendationBlock({ block }) {
   );
 }
 
+// ── Multi-scenario (combined appliance plan) ──────────────────────────────────
+function ApplChangeBars({ changes }) {
+  if (!changes || changes.length === 0) return null;
+  const rows = changes.map(c => {
+    const beforePeak = (c.before_curve || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterPeak  = (c.after_curve  || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const delta      = afterPeak - beforePeak;
+    return { ...c, beforePeak, afterPeak, delta };
+  });
+  const maxVal = Math.max(...rows.map(r => r.beforePeak), 1);
+
+  return (
+    <div className="space-y-2">
+      {rows.map((r, i) => {
+        const color    = APPLIANCE_LAYERS.find(l => l.key === r.appliance)?.color || '#5b4bff';
+        const beforeW  = (r.beforePeak / maxVal) * 100;
+        const afterW   = (r.afterPeak  / maxVal) * 100;
+        const positive = r.delta < 0;
+        return (
+          <div key={i} className="bg-white border border-line rounded-xl p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-forest-900 flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+                {r.appliance}
+                <span className="text-[10px] font-normal text-ink-mute uppercase tracking-wide">peak window</span>
+              </span>
+              <span className={`text-xs font-medium tabnum ${positive ? 'text-forest-700' : 'text-amber-600'}`}>
+                {positive ? '−' : '+'}{fmtNumber(Math.abs(r.delta), 1)} kWh
+              </span>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] w-10 text-ink-mute uppercase tracking-wide flex-shrink-0">Before</span>
+                <div className="flex-1 bg-cream-200 rounded h-2.5 overflow-hidden">
+                  <div className="h-full rounded" style={{ width: `${beforeW}%`, backgroundColor: color, opacity: 0.45 }} />
+                </div>
+                <span className="text-xs tabnum text-ink-soft w-14 text-right">{fmtNumber(r.beforePeak, 1)} kWh</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] w-10 text-ink-mute uppercase tracking-wide flex-shrink-0">After</span>
+                <div className="flex-1 bg-cream-200 rounded h-2.5 overflow-hidden">
+                  <div className="h-full rounded" style={{ width: `${afterW}%`, backgroundColor: color }} />
+                </div>
+                <span className="text-xs tabnum text-forest-900 font-medium w-14 text-right">{fmtNumber(r.afterPeak, 1)} kWh</span>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MultiScenarioBlock({ block }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (block.error) {
+    return (
+      <div className="flex gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+        <AlertTriangle size={15} className="text-red-500 mt-0.5 flex-shrink-0" />
+        <p className="text-sm text-red-700">Multi-scenario error: {block.error}</p>
+      </div>
+    );
+  }
+
+  const savLow  = block.savings_annual_low  || 0;
+  const savHigh = block.savings_annual_high || 0;
+  const changes = block.appliance_changes   || [];
+  const rc      = block.retailer_comparison || {};
+
+  return (
+    <div className="bg-cream-50 border-2 border-violet/30 rounded-xl overflow-hidden">
+      {/* Header */}
+      <button
+        type="button"
+        className="w-full text-left p-4 hover:bg-violet/5 transition-colors"
+        onClick={() => setExpanded(e => !e)}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <span className="text-[10px] uppercase tracking-wider text-violet/70">Combined Plan</span>
+            <h3 className="font-display text-lg text-forest-900 leading-snug">
+              {block.name || 'Full Site Reduction Plan'}
+            </h3>
+            {/* Appliance colour dots */}
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              {changes.map((c, i) => {
+                const color = APPLIANCE_LAYERS.find(l => l.key === c.appliance)?.color || '#5b4bff';
+                return (
+                  <span key={i} className="flex items-center gap-1 text-xs text-ink-soft">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+                    {c.appliance}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+          <div className="text-right flex-shrink-0">
+            <p className="text-[10px] uppercase tracking-wider text-ink-mute">Combined saving</p>
+            <p className="font-display text-xl text-forest-700 tabnum">
+              {fmtCurrency(savLow)}
+              {savHigh > savLow && <span className="text-sm text-ink-mute"> – {fmtCurrency(savHigh)}</span>}
+            </p>
+            <p className="text-[10px] text-ink-mute">/yr</p>
+          </div>
+          <div className="self-center flex-shrink-0">
+            {expanded ? <ChevronUp size={15} className="text-ink-mute" /> : <ChevronDown size={15} className="text-ink-mute" />}
+          </div>
+        </div>
+      </button>
+
+      {/* Expanded */}
+      {expanded && (
+        <div className="border-t border-violet/20 px-4 py-5 space-y-5">
+
+          {/* Combined before / after chart */}
+          {block.total_curve_before && block.total_curve_after && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+                Total Site Demand — Before vs After
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-white border border-line rounded-xl p-3">
+                  <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
+                  <HourlyLineChart series={block.total_curve_before} height={140} />
+                </div>
+                <div className="bg-white border border-line rounded-xl p-3">
+                  <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
+                  <HourlyLineChart series={block.total_curve_after} height={140} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Per-appliance contribution bars */}
+          {changes.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+                Peak Reduction by Appliance
+              </p>
+              <ApplChangeBars changes={changes} />
+            </div>
+          )}
+
+          {/* Rationale */}
+          {block.rationale && (
+            <p className="text-sm text-ink-soft leading-relaxed">{block.rationale}</p>
+          )}
+
+          {/* Savings row */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-forest-50 border border-forest-200 rounded-xl p-3 text-center">
+              <p className="text-[10px] uppercase tracking-wider text-forest-600 mb-1">On current tariff</p>
+              <p className="font-display text-lg text-forest-800 tabnum">{fmtCurrency(savLow)}/yr</p>
+            </div>
+            <div className="bg-violet/8 border border-violet/25 rounded-xl p-3 text-center">
+              <p className="text-[10px] uppercase tracking-wider text-violet/70 mb-1">Best retailer too</p>
+              <p className="font-display text-lg text-violet tabnum">{fmtCurrency(savHigh)}/yr</p>
+            </div>
+            <div className="bg-cream-50 border border-line rounded-xl p-3 text-center">
+              <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">Total peak shifted</p>
+              <p className="font-display text-lg text-forest-900 tabnum">
+                {fmtNumber(block.peak_kwh_shifted || 0, 1)} kWh
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Error ─────────────────────────────────────────────────────────────────────
 function ErrorBlock({ block }) {
   return (
@@ -345,6 +517,7 @@ export default function BlockRenderer({ block }) {
     case 'kpi_row':        return <KpiRowBlock block={block} />;
     case 'load_chart':     return <LoadChartBlock block={block} />;
     case 'scenario':       return <ScenarioBlock block={block} />;
+    case 'multi_scenario': return <MultiScenarioBlock block={block} />;
     case 'retailer_table': return <RetailerTableBlock block={block} />;
     case 'recommendation': return <RecommendationBlock block={block} />;
     case 'error':          return <ErrorBlock block={block} />;

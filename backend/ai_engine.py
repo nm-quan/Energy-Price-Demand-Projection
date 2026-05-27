@@ -21,8 +21,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import anthropic
 
 from models import Tariff
-from baseline_engine import compute_shape_metrics
-from scenario_claude import _run_simulation, compute_retailer_comparison
+from baseline_engine import compute_shape_metrics, compute_annual_cost_components
+from scenario_claude import _run_simulation, _aggregate, compute_retailer_comparison
 
 logger = logging.getLogger("ai_engine")
 
@@ -54,7 +54,7 @@ COMPOSE_TOOL: Dict[str, Any] = {
                             "type": "string",
                             "enum": [
                                 "headline", "text", "kpi_row",
-                                "load_chart", "scenario",
+                                "load_chart", "scenario", "multi_scenario",
                                 "retailer_table", "recommendation",
                             ],
                         },
@@ -91,6 +91,22 @@ COMPOSE_TOOL: Dict[str, Any] = {
                         "scale_factor": {"type": "number"},
                         "name":         {"type": "string"},
                         "rationale":    {"type": "string"},
+                        # multi_scenario — ordered list of changes applied sequentially
+                        "changes": {
+                            "type": "array",
+                            "description": "2–4 appliance changes applied sequentially to a shared load curve",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "appliance":    {"type": "string"},
+                                    "action":       {"type": "string", "enum": ["shift_window", "set_off", "scale"]},
+                                    "from_window":  {"type": "array", "items": {"type": "integer"}},
+                                    "to_window":    {"type": "array", "items": {"type": "integer"}},
+                                    "from_scale":   {"type": "number"},
+                                    "scale_factor": {"type": "number"},
+                                },
+                            },
+                        },
                         # recommendation
                         "priority": {"type": "string", "enum": ["high", "medium", "low"]},
                         "levers":   {"type": "array", "items": {"type": "string"}},
@@ -131,7 +147,7 @@ kpi_row        2–4 metrics side by side.
 load_chart     Site load curve. Set appliance= to overlay that appliance's curve.
                title: short description of what the chart shows
 
-scenario       A load-shifting change. Server runs ALL math — you just specify:
+scenario       A SINGLE-appliance load-shifting change. Server runs ALL math — you just specify:
                appliance: exact name from the list
                action: shift_window | set_off | scale
                from_window: [start, end] buckets to reduce. 0=midnight, 30=3pm, 42=9pm
@@ -141,7 +157,15 @@ scenario       A load-shifting change. Server runs ALL math — you just specify
                name: "Appliance Strategy — Description" (5–8 words, specific)
                rationale: 2 sentences — what changes and why it saves money
 
-retailer_table Shows all retailer costs. Include after every scenario.
+multi_scenario A COMBINED multi-appliance plan applied to a shared load curve.
+               changes: array of 2–4 items, each with {appliance, action, from_window, to_window, from_scale, scale_factor}
+               Server applies them SEQUENTIALLY — each change operates on the already-modified curve.
+               Combined saving is greater than the sum of individual savings.
+               name: "Full Site Peak Reduction — HVAC + Fridges + Dishwasher"
+               rationale: paragraph explaining the combined strategy and total saving potential
+               Order changes highest-impact first. Do NOT repeat appliances.
+
+retailer_table Shows all retailer costs. Include after every scenario or multi_scenario.
 
 recommendation Priority action with 3 levers containing real $ numbers.
                priority: "high" | "medium" | "low"
@@ -149,11 +173,11 @@ recommendation Priority action with 3 levers containing real $ numbers.
 
 === WHEN TO USE WHICH BLOCKS ===
 
-Specific appliance ("cut the fridge", "shift dishwasher"):
+Specific appliance ("cut the fridge", "shift dishwasher", "pre-cool HVAC"):
   headline → text(callout, why this appliance) → load_chart(appliance=X) → scenario → retailer_table → recommendation
 
-General optimisation ("make it cheaper", "what should I do"):
-  headline → kpi_row → scenario × 2–3 → retailer_table → recommendation
+Multi-appliance plan ("full site reduction plan", "top 3 appliance saves", "peak hour reduction package", "just make it cheaper"):
+  headline → kpi_row → multi_scenario (3 changes: top 3 by TOU-peak kWh) → retailer_table → recommendation
 
 Usage question ("what uses most", "show load"):
   headline → kpi_row → load_chart (no appliance overlay)
@@ -164,7 +188,7 @@ Retailer question ("which retailer", "switch supplier"):
 Quick question ("what's my load factor", "when is peak"):
   headline → kpi_row (2–3 metrics)
 
-Follow-up ("now show HVAC", "compare those two"):
+Follow-up on a single appliance ("now show HVAC", "what about hot water"):
   headline → scenario → recommendation
 
 === SCENARIO PARAMETER GUIDE ===
@@ -299,6 +323,106 @@ def _call_ai(
     return blocks
 
 
+# ── Multi-scenario helpers ────────────────────────────────────────────────────
+
+def _apply_change(
+    working: Dict[str, List[float]],
+    change: Dict[str, Any],
+) -> tuple:
+    """Apply one appliance change to the shared working dict.
+    Returns (before_curve, after_curve) or (None, None) if appliance not found.
+    Mutates working[appliance] in-place."""
+    target = change.get("appliance", "")
+    if target not in working:
+        match = next((k for k in working if k.lower() == target.lower()), None)
+        if not match:
+            logger.warning("_apply_change: appliance '%s' not found", target)
+            return None, None
+        target = match
+
+    before = list(working[target])
+    after  = list(before)
+    action = change.get("action", "shift_window")
+    fs     = min(1.0, max(0.0, float(change.get("from_scale", 0.5))))
+
+    if action == "shift_window":
+        fw = change.get("from_window") or [30, 42]
+        tw = change.get("to_window")   or [0, 14]
+        f_s, f_e = int(fw[0]), int(fw[1])
+        t_s, t_e = int(tw[0]), int(tw[1])
+        moved_kwh = 0.0
+        for b in range(max(0, f_s), min(48, f_e)):
+            delta = before[b] * fs
+            after[b] -= delta
+            moved_kwh += delta * 0.5
+        to_buckets = max(1, t_e - t_s)
+        add_per = (moved_kwh / 0.5) / to_buckets
+        for b in range(max(0, t_s), min(48, t_e)):
+            after[b] += add_per
+    elif action == "set_off":
+        fw = change.get("from_window") or [30, 42]
+        f_s, f_e = int(fw[0]), int(fw[1])
+        for b in range(max(0, f_s), min(48, f_e)):
+            after[b] = before[b] * (1.0 - fs)
+    elif action == "scale":
+        sf = float(change.get("scale_factor", 1.0))
+        after = [v * sf for v in before]
+
+    working[target] = after
+    return before, after
+
+
+def _resolve_multi_scenario_block(
+    block: Dict[str, Any],
+    appliance_curves: Dict[str, List[float]],
+    baseline_curve: List[float],
+    tariff: Tariff,
+    annual_kwh: float,
+) -> Dict[str, Any]:
+    working = {k: list(v) for k, v in appliance_curves.items()}
+    appliance_changes: List[Dict[str, Any]] = []
+    total_peak_shifted = 0.0
+
+    for change in block.get("changes", []):
+        before, after = _apply_change(working, change)
+        if before is None:
+            continue
+        peak_b = sum(before[b] * 0.5 for b in range(30, 42))
+        peak_a = sum(after[b]  * 0.5 for b in range(30, 42))
+        total_peak_shifted += peak_b - peak_a
+        appliance_changes.append({
+            "appliance":    change.get("appliance", ""),
+            "action":       change.get("action", "shift_window"),
+            "before_curve": [round(v, 3) for v in before],
+            "after_curve":  [round(v, 3) for v in after],
+        })
+
+    if not appliance_changes:
+        return {**block, "resolved": True, "error": "No changes could be applied"}
+
+    final_total  = _aggregate(working)
+    baseline_sum = sum(baseline_curve)
+    new_annual   = annual_kwh * (sum(final_total) / baseline_sum) if baseline_sum > 0 else annual_kwh
+    base_cost    = compute_annual_cost_components(baseline_curve, tariff, annual_kwh)["grand_total"]
+    new_cost     = compute_annual_cost_components(final_total, tariff, new_annual)["grand_total"]
+    retailer     = compute_retailer_comparison(final_total, new_annual, tariff)
+    saving_low   = base_cost - new_cost
+    saving_high  = saving_low + retailer.get("max_saving_vs_current", 0)
+
+    return {
+        **block,
+        "resolved":           True,
+        "appliance_changes":  appliance_changes,
+        "total_curve_before": [round(v, 3) for v in baseline_curve],
+        "total_curve_after":  [round(v, 3) for v in final_total],
+        "savings_annual_low":  max(0.0, saving_low),
+        "savings_annual_high": max(0.0, saving_high),
+        "peak_kwh_shifted":    round(total_peak_shifted, 2),
+        "new_annual_kwh":      round(new_annual, 1),
+        "retailer_comparison": retailer,
+    }
+
+
 # ── Block resolver (sync — runs in thread) ────────────────────────────────────
 
 def _resolve_block(
@@ -309,6 +433,9 @@ def _resolve_block(
     annual_kwh: float,
 ) -> Dict[str, Any]:
     btype = block.get("type")
+
+    if btype == "multi_scenario":
+        return _resolve_multi_scenario_block(block, appliance_curves, baseline_curve, tariff, annual_kwh)
 
     if btype == "scenario":
         sim = _run_simulation(appliance_curves, baseline_curve, tariff, annual_kwh, block)
