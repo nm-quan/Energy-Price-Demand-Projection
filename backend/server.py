@@ -40,6 +40,7 @@ import os
 from baseline_engine import compute_baseline, compute_shape_metrics
 from scenario_claude import generate_scenarios, generate_single, _has_api_key, compute_retailer_comparison
 from ai_engine import stream_analysis as _stream_analysis
+from ai_engine import DEFAULT_CHANGES, _apply_change, _aggregate, _resolve_multi_scenario_block
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -868,6 +869,48 @@ async def analyse_client(client_id: str, body: AnalyseRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+# ── Combined Plan ─────────────────────────────────────────────────────────────
+
+@app.post("/api/clients/{client_id}/combined-plan")
+async def get_combined_plan(client_id: str):
+    client = data_store.clients.get(client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    tariff = _resolve_tariff(client_id)
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+    site_type = client.get("site_type", "cafe")
+    appliance_curves = _split_appliance_curves(load_curve, site_type)
+    shape = compute_shape_metrics(load_curve, annual_kwh)
+
+    def tou_kwh(n):
+        c = appliance_curves.get(n, [])
+        return sum(c[b] * 0.5 for b in range(30, 42) if b < len(c))
+
+    top3 = sorted(appliance_curves, key=tou_kwh, reverse=True)[:3]
+
+    changes = []
+    for app in top3:
+        key = next((k for k in DEFAULT_CHANGES if k.lower() == app.lower()), None)
+        params = DEFAULT_CHANGES[key] if key else {
+            "action": "shift_window", "from_window": [30, 42], "to_window": [0, 14], "from_scale": 0.40,
+        }
+        changes.append({"appliance": app, **params})
+
+    block = {
+        "type": "multi_scenario",
+        "name": f"Full Site Peak Reduction — {' + '.join(top3)}",
+        "rationale": (
+            f"Combined load-shifting plan targeting the top {len(top3)} TOU-peak appliances: "
+            f"{', '.join(top3)}. Each change is applied sequentially to the already-modified "
+            "load curve, so the combined saving exceeds any single shift alone."
+        ),
+        "changes": changes,
+    }
+
+    resolved = _resolve_multi_scenario_block(block, appliance_curves, load_curve, tariff, annual_kwh)
+    return resolved
 
 
 # ── Chat ─────────────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ import {
   Layers, Store, Send, MessageCircle,
 } from 'lucide-react';
 import {
-  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, getCombinedPlan, fmtCurrency, fmtNumber,
 } from '../lib/api';
 import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import HourlyLineChart from '../components/HourlyLineChart';
@@ -381,6 +381,8 @@ export default function ScenarioBuilder() {
   const [expandedId,       setExpandedId]       = useState(null);
   const [creatingReport,   setCreatingReport]   = useState(false);
   const [storeContext,     setStoreContext]      = useState(null);
+  const [combinedPlan,     setCombinedPlan]     = useState(null);
+  const [combinedLoading,  setCombinedLoading]  = useState(false);
 
   useEffect(() => {
     // Pick up any store context passed from baseline page
@@ -463,6 +465,18 @@ export default function ScenarioBuilder() {
       return [scenario, ...prev];
     });
     setExpandedId(scenario.id);
+  };
+
+  const loadCombinedPlan = async () => {
+    setCombinedLoading(true);
+    try {
+      const res = await getCombinedPlan(id);
+      setCombinedPlan(res.data);
+    } catch (e) {
+      setError('Failed to load combined plan.');
+    } finally {
+      setCombinedLoading(false);
+    }
   };
 
   const handleClearAll = async () => {
@@ -671,6 +685,58 @@ export default function ScenarioBuilder() {
               </button>
             </div>
           )}
+
+          {/* Combined Plan card */}
+          <div className="bg-cream-50 border-2 border-violet/30 rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-violet/70">Combined Plan</p>
+                <h3 className="font-display text-base text-forest-900">Full Site Peak Reduction</h3>
+              </div>
+              <button
+                type="button"
+                onClick={loadCombinedPlan}
+                disabled={combinedLoading}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet/10 hover:bg-violet/20 text-violet text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              >
+                {combinedLoading ? <Loader size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {combinedLoading ? 'Computing…' : combinedPlan ? 'Refresh' : 'Generate'}
+              </button>
+            </div>
+
+            {combinedPlan && !combinedPlan.error && (
+              <div className="border-t border-violet/20 px-4 py-4 space-y-4">
+                {/* Savings row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-forest-50 border border-forest-200 rounded-xl p-3 text-center">
+                    <p className="text-[10px] uppercase tracking-wider text-forest-600 mb-1">On current tariff</p>
+                    <p className="font-display text-lg text-forest-800 tabnum">{fmtCurrency(combinedPlan.savings_annual_low || 0)}/yr</p>
+                  </div>
+                  <div className="bg-violet/5 border border-violet/25 rounded-xl p-3 text-center">
+                    <p className="text-[10px] uppercase tracking-wider text-violet/70 mb-1">With best retailer</p>
+                    <p className="font-display text-lg text-violet tabnum">{fmtCurrency(combinedPlan.savings_annual_high || 0)}/yr</p>
+                  </div>
+                  <div className="bg-cream-50 border border-line rounded-xl p-3 text-center">
+                    <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">Peak kWh shifted</p>
+                    <p className="font-display text-lg text-forest-900 tabnum">{fmtNumber(combinedPlan.peak_kwh_shifted || 0, 1)} kWh</p>
+                  </div>
+                </div>
+
+                {/* Per-appliance bars */}
+                {(combinedPlan.appliance_changes || []).length > 0 && (
+                  <ApplianceChangeBars changes={combinedPlan.appliance_changes} />
+                )}
+
+                {combinedPlan.rationale && (
+                  <p className="text-sm text-ink-soft leading-relaxed">{combinedPlan.rationale}</p>
+                )}
+              </div>
+            )}
+
+            {combinedPlan?.error && (
+              <p className="px-4 py-3 text-sm text-red-600 border-t border-red-100">{combinedPlan.error}</p>
+            )}
+          </div>
 
           <div className="space-y-3" data-testid="scenarios-list">
             {scenarios.map((s) => (

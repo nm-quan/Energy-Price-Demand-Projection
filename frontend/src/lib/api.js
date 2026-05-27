@@ -51,6 +51,9 @@ export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
 export const deleteScenario = (sid) => api.delete(`/api/scenarios/${sid}`);
 export const clearClientScenarios = (id) => api.delete(`/api/clients/${id}/scenarios`);
 
+// Combined Plan
+export const getCombinedPlan = (id) => api.post(`/api/clients/${id}/combined-plan`);
+
 // Chat
 export const chatWithClient = (id, messages, userMessage) =>
   api.post(`/api/clients/${id}/chat`, { messages, user_message: userMessage });
