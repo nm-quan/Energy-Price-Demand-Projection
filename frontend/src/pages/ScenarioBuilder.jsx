@@ -1,40 +1,41 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Check, ChevronDown, ChevronUp,
-  Layers, Store,
+  Layers, Store, Send, MessageCircle,
 } from 'lucide-react';
 import {
-  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, fmtCurrency, fmtNumber,
 } from '../lib/api';
-import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
+import HourlyLineChart from '../components/HourlyLineChart';
 
 const HINT_PROMPTS = [
-  'Focus on HVAC pre-cooling',
-  'Include a battery option',
-  'Cheapest capex, fastest payback',
-  'Switch retailer + shift load',
-  'Aggressive load-shift to off-peak',
-  'Minimise demand charges',
+  'Just make it cheaper',
+  'No upfront cost',
+  'Fastest payback',
+  'Switch retailer too',
+  'Cut the peak bill',
+  'Overnight shift only',
 ];
-
-function getAfterApplianceCurves(scenario) {
-  const after = { ...(scenario.baseline_appliance_curves || {}) };
-  for (const change of (scenario.appliance_changes || [])) {
-    if (change.after_curve && change.appliance) {
-      after[change.appliance] = change.after_curve;
-    }
-  }
-  return after;
-}
 
 // ── Appliance before/after bars ──────────────────────────────────────────────
 function ApplianceChangeBars({ changes }) {
   if (!changes || changes.length === 0) return null;
   const rows = changes.map((c) => {
-    const beforeKwh = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
-    const afterKwh  = (c.after_curve  || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
-    return { ...c, beforeKwh, afterKwh, delta: afterKwh - beforeKwh };
+    const beforeTotal = (c.before_curve || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterTotal  = (c.after_curve  || []).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const totalDelta  = afterTotal - beforeTotal;
+    // Peak window: buckets 30–42 = 3pm–9pm
+    const beforePeak  = (c.before_curve || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const afterPeak   = (c.after_curve  || []).slice(30, 42).reduce((s, v) => s + (v || 0) * 0.5, 0);
+    const peakDelta   = afterPeak - beforePeak;
+    // Shift: total barely changes but peak drops — show peak kWh so bars differ visually
+    const isShift = Math.abs(totalDelta) < 0.5 && Math.abs(peakDelta) > 0.05;
+    const beforeKwh = isShift ? beforePeak : beforeTotal;
+    const afterKwh  = isShift ? afterPeak  : afterTotal;
+    const delta     = isShift ? peakDelta  : totalDelta;
+    return { ...c, beforeKwh, afterKwh, delta, isShift };
   });
   const maxAbs = Math.max(...rows.map((r) => Math.max(r.beforeKwh, r.afterKwh)), 1);
 
@@ -44,12 +45,17 @@ function ApplianceChangeBars({ changes }) {
         const layerColor = APPLIANCE_LAYERS.find((l) => l.key === r.appliance)?.color || '#5b4bff';
         const beforeW = (r.beforeKwh / maxAbs) * 100;
         const afterW  = (r.afterKwh  / maxAbs) * 100;
+        const positive = r.delta < 0;
+        const label = r.isShift
+          ? `${positive ? '−' : '+'}${fmtNumber(Math.abs(r.delta), 1)} kWh peak · shifted off-peak`
+          : `${positive ? '−' : '+'}${fmtNumber(Math.abs(r.delta), 0)} kWh/day · ${positive ? 'reduced' : 'added'}`;
         return (
           <div key={i} className="bg-white border border-line rounded-xl p-3">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-forest-900 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: layerColor }} />
                 {r.appliance}
+                {r.isShift && <span className="text-[10px] font-normal text-ink-mute uppercase tracking-wide">peak window</span>}
               </span>
               <span className="text-[11px] text-ink-mute max-w-[60%] text-right leading-snug">{r.summary}</span>
             </div>
@@ -60,7 +66,7 @@ function ApplianceChangeBars({ changes }) {
                   <div className="h-full rounded" style={{ width: `${beforeW}%`, backgroundColor: layerColor, opacity: 0.45 }} />
                 </div>
                 <span className="text-xs font-medium text-forest-800 tabnum w-16 text-right flex-shrink-0">
-                  {fmtNumber(r.beforeKwh, 0)} kWh
+                  {fmtNumber(r.beforeKwh, 1)} kWh
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -69,12 +75,12 @@ function ApplianceChangeBars({ changes }) {
                   <div className="h-full rounded" style={{ width: `${afterW}%`, backgroundColor: layerColor }} />
                 </div>
                 <span className="text-xs font-medium text-forest-900 tabnum w-16 text-right flex-shrink-0">
-                  {fmtNumber(r.afterKwh, 0)} kWh
+                  {fmtNumber(r.afterKwh, 1)} kWh
                 </span>
               </div>
               <div className="pl-14">
-                <span className={`text-[11px] tabnum font-medium ${r.delta < 0 ? 'text-forest-700' : 'text-amber-600'}`}>
-                  {r.delta < 0 ? '−' : '+'}{fmtNumber(Math.abs(r.delta), 0)} kWh/day · {r.delta < 0 ? 'reduced' : 'added'}
+                <span className={`text-[11px] tabnum font-medium ${positive ? 'text-forest-700' : 'text-amber-600'}`}>
+                  {label}
                 </span>
               </div>
             </div>
@@ -117,7 +123,6 @@ function RetailerNegotiation({ scenario }) {
 function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, onToggleExpand }) {
   const totalLow   = scenario.savings_annual_low  ?? 0;
   const totalHigh  = scenario.savings_annual_high ?? 0;
-  const afterCurves = getAfterApplianceCurves(scenario);
 
   return (
     <div
@@ -144,6 +149,13 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
           <div className="flex-1 min-w-0">
             <span className="text-[10px] uppercase tracking-wider text-ink-mute">Proposed Plan {scenario.rank}</span>
             <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
+            {scenario.appliance_changes?.[0] && (
+              <p className="text-xs text-ink-soft mt-0.5">
+                Shift <span className="font-medium text-forest-800">{scenario.appliance_changes[0].appliance}</span> off-peak
+                {scenario.retailer_winner && <> → <span className="font-medium text-violet">{scenario.retailer_winner}</span></>}
+                {' → '}save ~<span className="font-medium text-forest-700 tabnum">{fmtCurrency(scenario.savings_annual_low)}/yr</span>
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-3 flex-shrink-0">
@@ -172,50 +184,52 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
       {expanded && (
         <div className="border-t border-line bg-cream-100/50 px-5 py-6 space-y-6">
 
-          {/* 1 — Before / After charts (full width, bigger) */}
-          <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
-              Load Profile — Before vs After
-            </h4>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white border border-line rounded-xl p-3">
-                <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
-                <StackedAreaChart
-                  applianceCurves={scenario.baseline_appliance_curves || {}}
-                  scales={{}}
-                  height={260}
-                  showLegend={false}
-                  testId={`scenario-chart-before-${scenario.id}`}
-                />
+          {/* 1 — Before / After line charts: appliance curve + total demand */}
+          {(() => {
+            const change = scenario.appliance_changes?.[0];
+            const appColor = APPLIANCE_LAYERS.find((l) => l.key === change?.appliance)?.color || '#5b4bff';
+            return (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
+                  Load Profile — Before vs After
+                </h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-white border border-line rounded-xl p-3">
+                    <p className="text-[11px] font-semibold text-ink-mute uppercase tracking-wide mb-2">Before</p>
+                    <HourlyLineChart
+                      series={scenario.baseline_curve || []}
+                      overlay={change?.before_curve || null}
+                      overlayColor={appColor}
+                      height={200}
+                      testId={`scenario-chart-before-${scenario.id}`}
+                    />
+                  </div>
+                  <div className="bg-white border border-line rounded-xl p-3">
+                    <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
+                    <HourlyLineChart
+                      series={scenario.shifted_curve || scenario.baseline_curve || []}
+                      overlay={change?.after_curve || null}
+                      overlayColor={appColor}
+                      height={200}
+                      testId={`scenario-chart-after-${scenario.id}`}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-5 mt-2 px-1">
+                  <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                    <span className="inline-block w-5 border-t-2 border-forest-900 opacity-70" />
+                    Total demand
+                  </span>
+                  {change?.appliance && (
+                    <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
+                      <span className="inline-block w-5 border-t-2" style={{ borderColor: appColor }} />
+                      {change.appliance}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="bg-white border border-line rounded-xl p-3">
-                <p className="text-[11px] font-semibold text-violet uppercase tracking-wide mb-2">After</p>
-                <StackedAreaChart
-                  applianceCurves={afterCurves}
-                  scales={{}}
-                  height={260}
-                  baseline={scenario.baseline_curve}
-                  showLegend={false}
-                  testId={`scenario-chart-after-${scenario.id}`}
-                />
-              </div>
-            </div>
-            {/* Shared legend */}
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-3 px-1">
-              {APPLIANCE_LAYERS.filter((l) =>
-                Object.keys(scenario.baseline_appliance_curves || {}).includes(l.key)
-              ).map((l) => (
-                <span key={l.key} className="flex items-center gap-1.5 text-[11px] text-ink-soft">
-                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: l.color }} />
-                  {l.key}
-                </span>
-              ))}
-              <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
-                <span className="inline-block w-6 border-t border-dashed border-forest-700 opacity-60" />
-                Baseline
-              </span>
-            </div>
-          </div>
+            );
+          })()}
 
           {/* 2 — Appliance changes */}
           {scenario.appliance_changes && scenario.appliance_changes.length > 0 && (
@@ -251,11 +265,110 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
   );
 }
 
+// ── Chat view ─────────────────────────────────────────────────────────────────
+function ChatView({ clientId, onScenarioGenerated }) {
+  const [messages, setMessages] = useState([
+    { role: 'assistant', content: "Hi! I can explain your energy costs, what to shift, and which retailer gives the best deal. Ask me anything — or say \"generate a plan\" and I'll build one." },
+  ]);
+  const [input, setInput]   = useState('');
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    setInput('');
+    const history = messages.map(({ role, content }) => ({ role, content }));
+    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    setLoading(true);
+    try {
+      const res = await chatWithClient(clientId, history, text);
+      const { reply, scenario } = res.data;
+      setMessages(prev => [...prev, { role: 'assistant', content: reply, scenario }]);
+      if (scenario) onScenarioGenerated(scenario);
+    } catch {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Something went wrong. Please try again.' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const CHAT_HINTS = ['What uses the most power?', 'How does load shifting work?', 'Which retailer is cheapest?', 'Generate a plan'];
+
+  return (
+    <div className="bg-forest-800 rounded-2xl overflow-hidden flex flex-col" style={{ height: '560px' }}>
+      <div className="flex-1 overflow-y-auto p-5 space-y-3">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[82%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+              m.role === 'user' ? 'bg-violet text-white' : 'bg-forest-700 text-forest-100'
+            }`}>
+              {m.content}
+              {m.scenario && (
+                <div className="mt-2.5 bg-forest-900/60 rounded-xl p-3 border border-forest-600">
+                  <p className="text-[10px] uppercase tracking-wider text-forest-400 mb-1">Plan generated</p>
+                  <p className="text-white font-semibold text-sm">{m.scenario.name}</p>
+                  <p className="text-lime font-medium text-sm tabnum mt-0.5">
+                    ~{fmtCurrency(m.scenario.savings_annual_low)}/yr → {m.scenario.retailer_winner}
+                  </p>
+                  <p className="text-forest-300 text-[11px] mt-1">Saved to Scenarios tab</p>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-forest-700 rounded-2xl px-4 py-3">
+              <Loader size={14} className="animate-spin text-forest-300" />
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="border-t border-forest-700 px-4 pt-3 pb-2 flex flex-wrap gap-2">
+        {CHAT_HINTS.map(h => (
+          <button
+            key={h}
+            onClick={() => { setInput(h); }}
+            className="text-[11px] px-3 py-1 rounded-full border border-forest-600 text-forest-300 hover:border-lime hover:text-lime transition-colors"
+          >
+            {h}
+          </button>
+        ))}
+      </div>
+
+      <div className="px-4 pb-4 flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Ask about this site's energy…"
+          className="flex-1 bg-forest-700 border border-forest-600 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-forest-400 focus:outline-none focus:border-lime"
+        />
+        <button
+          onClick={send}
+          disabled={loading || !input.trim()}
+          className="btn-violet flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center disabled:opacity-40"
+        >
+          <Send size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function ScenarioBuilder() {
   const { id } = useParams();
   const navigate = useNavigate();
 
+  const [activeTab,        setActiveTab]        = useState('scenarios');
   const [client,           setClient]           = useState(null);
   const [scenarios,        setScenarios]        = useState([]);
   const [count,            setCount]            = useState(3);
@@ -300,10 +413,20 @@ export default function ScenarioBuilder() {
         const elapsed = Math.floor((Date.now() - start) / 1000);
         const jobRes  = await getGenerationJob(jobId);
         const job     = jobRes.data;
+
+        // Show partial results as they arrive, deduplicating by id
+        const partial = job.scenarios || [];
+        if (partial.length > 0) {
+          setScenarios((cur) => {
+            const existingIds = new Set(cur.map((s) => s.id));
+            const newOnes = partial.filter((s) => !existingIds.has(s.id));
+            if (newOnes.length === 0) return cur;
+            if (newOnes[0]) setExpandedId(newOnes[0].id);
+            return [...newOnes, ...cur];
+          });
+        }
+
         if (job.status === 'done') {
-          const newScenarios = job.scenarios || [];
-          setScenarios((cur) => [...newScenarios, ...cur]);
-          if (newScenarios[0]) setExpandedId(newScenarios[0].id);
           setExtraInstruction('');
           setGenerating(false);
           setProgress('');
@@ -312,8 +435,9 @@ export default function ScenarioBuilder() {
           setGenerating(false);
           setProgress('');
         } else {
-          setProgress(`Generating ${count} scenario${count > 1 ? 's' : ''} in parallel · ${elapsed}s`);
-          setTimeout(poll, 2500);
+          const completed = partial.length;
+          setProgress(`${completed} of ${count} scenario${count > 1 ? 's' : ''} ready · ${elapsed}s`);
+          setTimeout(poll, 1000);
         }
       };
       setTimeout(poll, 1500);
@@ -328,6 +452,15 @@ export default function ScenarioBuilder() {
     await deleteScenario(sid);
     setScenarios((cur) => cur.filter((s) => s.id !== sid));
     setSelectedIds((cur) => { const next = new Set(cur); next.delete(sid); return next; });
+  };
+
+  const handleScenarioFromChat = (scenario) => {
+    setScenarios(prev => {
+      const existingIds = new Set(prev.map(s => s.id));
+      if (existingIds.has(scenario.id)) return prev;
+      return [scenario, ...prev];
+    });
+    setExpandedId(scenario.id);
   };
 
   const handleClearAll = async () => {
@@ -377,17 +510,45 @@ export default function ScenarioBuilder() {
 
       <div className="flex items-end justify-between mb-8 gap-6">
         <div>
-          <h1 className="font-display text-5xl text-forest-900 leading-none">Load-shift scenarios.</h1>
+          <h1 className="font-display text-5xl text-forest-900 leading-none">
+            {activeTab === 'scenarios' ? 'Load-shift scenarios.' : 'Chat with your data.'}
+          </h1>
           <p className="text-sm text-ink-soft mt-3 max-w-xl">
-            Claude analyses the site, simulates appliance-level changes, compares retailers, and saves each scenario.
+            {activeTab === 'scenarios'
+              ? 'Claude shifts appliance load off-peak, compares retailers, and shows you where to save.'
+              : 'Ask about energy costs, what to shift, which retailer is best — or say "generate a plan".'}
           </p>
+        </div>
+        <div className="flex gap-1 bg-forest-100 rounded-full p-1 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab('scenarios')}
+            className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'scenarios' ? 'bg-white text-forest-900 shadow-sm' : 'text-ink-mute hover:text-forest-900'
+            }`}
+          >
+            <Sparkles size={13} />Scenarios
+          </button>
+          <button
+            onClick={() => setActiveTab('chat')}
+            className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'chat' ? 'bg-white text-forest-900 shadow-sm' : 'text-ink-mute hover:text-forest-900'
+            }`}
+          >
+            <MessageCircle size={13} />Chat
+          </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
 
-        {/* Main column */}
-        <div className="lg:col-span-5 space-y-5">
+        {activeTab === 'chat' && (
+          <div className="lg:col-span-7">
+            <ChatView clientId={id} onScenarioGenerated={handleScenarioFromChat} />
+          </div>
+        )}
+
+        {/* Main column — scenarios tab */}
+        <div className={`lg:col-span-5 space-y-5 ${activeTab === 'chat' ? 'hidden' : ''}`}>
 
           {/* Generator card */}
           <div className="bg-forest-800 text-white rounded-2xl p-6 shadow-card">
@@ -415,7 +576,7 @@ export default function ScenarioBuilder() {
                 type="text"
                 value={extraInstruction}
                 onChange={(e) => setExtraInstruction(e.target.value)}
-                placeholder="Optional focus (e.g. battery only, no capex over $20k)…"
+                placeholder="e.g. just make it cheaper, no big installs…"
                 data-testid="extra-instruction-input"
                 className="flex-1 min-w-[200px] bg-forest-700 border border-forest-600 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-lime placeholder:text-forest-100/30"
               />
@@ -535,7 +696,7 @@ export default function ScenarioBuilder() {
         </div>
 
         {/* Side rail — report bundler only */}
-        <aside className="lg:col-span-2">
+        <aside className={`lg:col-span-2 ${activeTab === 'chat' ? 'hidden' : ''}`}>
           {scenarios.length > 0 && (
             <div className="bg-violet/10 border border-violet/30 rounded-2xl p-4">
               <h3 className="font-display text-lg text-forest-900 mb-1">Bundle into a report</h3>

@@ -50,6 +50,10 @@ export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
 export const deleteScenario = (sid) => api.delete(`/api/scenarios/${sid}`);
 export const clearClientScenarios = (id) => api.delete(`/api/clients/${id}/scenarios`);
 
+// Chat
+export const chatWithClient = (id, messages, userMessage) =>
+  api.post(`/api/clients/${id}/chat`, { messages, user_message: userMessage });
+
 // Reports
 export const createReport = (id, payload) => api.post(`/api/clients/${id}/reports`, payload);
 export const listReports = (id) => api.get(`/api/clients/${id}/reports`);

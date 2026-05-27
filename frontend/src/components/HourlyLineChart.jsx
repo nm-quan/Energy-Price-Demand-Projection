@@ -42,6 +42,7 @@ export default function HourlyLineChart({
   height = 220,
   fill = true,
   primaryColor = '#0d2e2a',
+  overlayColor = '#5b4bff',
   testId = 'hourly-line-chart',
   showTooltip = true,
 }) {
@@ -134,7 +135,7 @@ export default function HourlyLineChart({
         )}
 
         {over && (
-          <path d={linePath(over)} fill="none" stroke="#5b4bff" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+          <path d={linePath(over)} fill="none" stroke={overlayColor} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
         )}
 
         {X_LABELS.map(({ hour, label }) => (
@@ -157,7 +158,7 @@ export default function HourlyLineChart({
             />
             <circle cx={xPos(hoverHour)} cy={yPos(main[hoverHour])} r={3.5} fill={primaryColor} />
             {over && (
-              <circle cx={xPos(hoverHour)} cy={yPos(over[hoverHour])} r={3.5} fill="#5b4bff" />
+              <circle cx={xPos(hoverHour)} cy={yPos(over[hoverHour])} r={3.5} fill={overlayColor} />
             )}
           </>
         )}
@@ -168,7 +169,7 @@ export default function HourlyLineChart({
           {String(hoverHour).padStart(2, '0')}:00 ·
           <span className="font-semibold ml-1">{fmtNumber(main[hoverHour], 2)} kW</span>
           {over && (
-            <span className="ml-3 text-violet">
+            <span className="ml-3" style={{ color: overlayColor }}>
               after: <span className="font-semibold">{fmtNumber(over[hoverHour], 2)} kW</span>
             </span>
           )}
