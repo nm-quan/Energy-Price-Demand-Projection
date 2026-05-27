@@ -25,6 +25,17 @@ logger = logging.getLogger("scenario_claude")
 MODEL_NAME = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 1500
 
+_DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
+    "Fridges":    {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 12],  "from_scale": 0.35},
+    "HVAC":       {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 16],  "from_scale": 0.55},
+    "Dishwasher": {"action": "shift_window", "from_window": [30, 42], "to_window": [2, 16],  "from_scale": 0.85},
+    "Hot Water":  {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 14],  "from_scale": 0.75},
+    "Ovens":      {"action": "shift_window", "from_window": [24, 42], "to_window": [6, 18],  "from_scale": 0.50},
+    "Espresso":   {"action": "shift_window", "from_window": [30, 42], "to_window": [16, 30], "from_scale": 0.50},
+    "Lighting":   {"action": "set_off",      "from_window": [30, 42], "from_scale": 0.25},
+    "Misc":       {"action": "set_off",      "from_window": [30, 42], "from_scale": 0.20},
+}
+
 
 def _has_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -259,6 +270,7 @@ def _build_user_message(
     scenario_idx: int,
     total_count: int,
     extra_instruction: Optional[str],
+    forced_appliance: Optional[str] = None,
 ) -> str:
     rates = tariff.energy_rates
 
@@ -292,6 +304,9 @@ def _build_user_message(
             f"(ranked #{scenario_idx} by TOU-peak kWh — choose a strategy appropriate for this appliance).\n"
         )
 
+    if forced_appliance:
+        msg += f"\nFocus your analysis on appliance: {forced_appliance}. Write the name, rationale, and negotiation levers specifically for this appliance.\n"
+
     return msg
 
 
@@ -308,11 +323,12 @@ def _generate_one(
     scenario_idx: int,
     total_count: int,
     extra_instruction: Optional[str],
+    forced_appliance: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
 
     user_msg = _build_user_message(
         client, tariff, annual_kwh, shape, appliance_curves,
-        scenario_idx, total_count, extra_instruction,
+        scenario_idx, total_count, extra_instruction, forced_appliance,
     )
 
     # Single AI call — understands the request, outputs params + narrative
@@ -331,6 +347,15 @@ def _generate_one(
 
     ai_params = dict(tu.input or {})
     logger.info("scenario %d: AI chose appliance=%s action=%s", scenario_idx, ai_params.get("appliance"), ai_params.get("action"))
+
+    # Server overrides appliance selection — AI only provides narrative
+    if forced_appliance:
+        matched = next((k for k in _DEFAULT_PARAMS if k.lower() == forced_appliance.lower()), None)
+        real_app = matched or forced_appliance
+        ai_params["appliance"] = real_app
+        if matched:
+            ai_params.update(_DEFAULT_PARAMS[matched])
+        logger.info("scenario %d: forced appliance=%s (was %s)", scenario_idx, real_app, ai_params.get("appliance"))
 
     # Server runs all math
     sim = _run_simulation(appliance_curves, baseline_curve, tariff, annual_kwh, ai_params)
@@ -373,11 +398,12 @@ def generate_single(
     tariff: Tariff,
     annual_kwh: float,
     extra_instruction: Optional[str] = None,
+    forced_appliance: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     cli = _get_client()
     baseline_curve = list(baseline.get("load_curve", []))
     shape = compute_shape_metrics(baseline_curve, annual_kwh)
-    return _generate_one(cli, client, appliance_curves, baseline_curve, tariff, annual_kwh, shape, 1, 1, extra_instruction)
+    return _generate_one(cli, client, appliance_curves, baseline_curve, tariff, annual_kwh, shape, 1, 1, extra_instruction, forced_appliance)
 
 
 def generate_scenarios(
@@ -389,6 +415,7 @@ def generate_scenarios(
     count: int = 3,
     extra_instruction: Optional[str] = None,
     on_scenario_done: Optional[Callable[[Dict[str, Any]], None]] = None,
+    forced_appliance: Optional[str] = None,
 ) -> Dict[str, Any]:
     cli = _get_client()
     baseline_curve = list(baseline.get("load_curve", []))
@@ -400,7 +427,7 @@ def generate_scenarios(
             pool.submit(
                 _generate_one,
                 cli, client, appliance_curves, baseline_curve, tariff, annual_kwh,
-                shape, i + 1, count, extra_instruction,
+                shape, i + 1, count, extra_instruction, forced_appliance,
             ): i + 1
             for i in range(count)
         }

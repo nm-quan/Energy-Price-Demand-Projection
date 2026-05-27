@@ -669,6 +669,7 @@ class GenerateScenariosRequest(BaseModel):
     count: int = 3
     extra_instruction: Optional[str] = None
     aggregate_store_ids: Optional[List[str]] = None
+    target_appliance: Optional[str] = None
 
 
 def _run_generation_job(
@@ -677,6 +678,7 @@ def _run_generation_job(
     count: int,
     extra_instruction: Optional[str],
     aggregate_store_ids: Optional[List[str]] = None,
+    target_appliance: Optional[str] = None,
 ) -> None:
     try:
         client = data_store.clients.get(client_id)
@@ -741,6 +743,7 @@ def _run_generation_job(
             count=count,
             extra_instruction=extra_instruction,
             on_scenario_done=_on_scenario_done,
+            forced_appliance=target_appliance,
         )
 
         if client_id not in data_store.clients:
@@ -781,7 +784,7 @@ def start_generate_job(client_id: str, body: GenerateScenariosRequest):
         }
     thread = threading.Thread(
         target=_run_generation_job,
-        args=(job_id, client_id, count, body.extra_instruction, body.aggregate_store_ids),
+        args=(job_id, client_id, count, body.extra_instruction, body.aggregate_store_ids, body.target_appliance),
         daemon=True,
     )
     thread.start()

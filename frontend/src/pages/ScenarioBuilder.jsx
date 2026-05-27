@@ -10,13 +10,13 @@ import {
 import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import HourlyLineChart from '../components/HourlyLineChart';
 
-const HINT_PROMPTS = [
-  'Just make it cheaper',
-  'Full site reduction plan',
-  'Top 3 appliance saves',
-  'Peak hour reduction package',
-  'Cut the peak bill',
-  'Overnight shifts only',
+const APPLIANCE_HINTS = [
+  { label: 'Shift HVAC peak',       appliance: 'HVAC' },
+  { label: 'Fridges overnight',     appliance: 'Fridges' },
+  { label: 'Reschedule dishwasher', appliance: 'Dishwasher' },
+  { label: 'Hot water off-peak',    appliance: 'Hot Water' },
+  { label: 'Cut lighting peak',     appliance: 'Lighting' },
+  { label: 'Shift ovens early',     appliance: 'Ovens' },
 ];
 
 // ── Appliance before/after bars ──────────────────────────────────────────────
@@ -373,6 +373,7 @@ export default function ScenarioBuilder() {
   const [scenarios,        setScenarios]        = useState([]);
   const count = 1;
   const [extraInstruction, setExtraInstruction] = useState('');
+  const [targetAppliance,  setTargetAppliance]  = useState(null);
   const [generating,       setGenerating]       = useState(false);
   const [progress,         setProgress]         = useState('');
   const [error,            setError]            = useState('');
@@ -405,7 +406,7 @@ export default function ScenarioBuilder() {
     setProgress('Starting…');
     try {
       const aggStoreIds = storeContext?.store_ids?.length > 0 ? storeContext.store_ids : null;
-      const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null, aggStoreIds);
+      const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null, aggStoreIds, targetAppliance);
       const jobId = res.data.job_id;
       setProgress('Claude is analysing the site…');
       const start = Date.now();
@@ -428,6 +429,7 @@ export default function ScenarioBuilder() {
 
         if (job.status === 'done') {
           setExtraInstruction('');
+          setTargetAppliance(null);
           setGenerating(false);
           setProgress('');
         } else if (job.status === 'error') {
@@ -584,16 +586,15 @@ export default function ScenarioBuilder() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {HINT_PROMPTS.map((hint) => (
+              {APPLIANCE_HINTS.map((hint) => (
                 <button
-                  key={hint}
+                  key={hint.label}
                   type="button"
-                  onClick={() => setExtraInstruction(hint)}
-                  data-testid={`hint-${hint.toLowerCase().replace(/\W+/g, '-')}`}
-                  className="hint-bubble"
+                  onClick={() => { setExtraInstruction(hint.label); setTargetAppliance(hint.appliance); }}
+                  className={`hint-bubble ${extraInstruction === hint.label ? 'ring-2 ring-violet/50' : ''}`}
                   style={{ background: 'rgba(255,255,255,0.06)', borderColor: 'rgba(196,233,74,0.3)', color: '#dde7c8' }}
                 >
-                  <Sparkles size={11} /> {hint}
+                  <Sparkles size={11} /> {hint.label}
                 </button>
               ))}
             </div>

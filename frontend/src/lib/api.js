@@ -39,11 +39,12 @@ export const getBaseline = (id) => api.get(`/api/clients/${id}/baseline`);
 export const recalcBaseline = (id, scales) => api.post(`/api/clients/${id}/baseline/recalc`, { scales });
 
 // Scenarios
-export const startGenerateScenarios = (id, count, extraInstruction = null, aggregateStoreIds = null) =>
+export const startGenerateScenarios = (id, count, extraInstruction = null, aggregateStoreIds = null, targetAppliance = null) =>
   api.post(`/api/clients/${id}/scenarios/generate`, {
     count,
     extra_instruction: extraInstruction,
     aggregate_store_ids: aggregateStoreIds,
+    target_appliance: targetAppliance,
   });
 export const getGenerationJob = (jobId) => api.get(`/api/scenarios/jobs/${jobId}`);
 export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
