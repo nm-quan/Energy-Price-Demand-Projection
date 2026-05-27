@@ -44,21 +44,170 @@ logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
 
 
+# ── Realistic per-appliance profiles for cafe (48 half-hourly kW) ─────────────
+# Each appliance has an independent curve based on real cafe operations.
+# Bucket mapping: b=0 → 00:00, b=12 → 06:00, b=30 → 15:00 (TOU peak start),
+#                 b=42 → 21:00 (TOU peak end), b=47 → 23:30
+
+CAFE_APPLIANCE_PROFILES: Dict[str, List[float]] = {
+    # HVAC: low overnight, ramps with morning heat, peaks hard during 3–9pm
+    "HVAC": [
+        # b0–11  midnight–6am: night setback
+        0.20, 0.20, 0.18, 0.18, 0.16, 0.16, 0.16, 0.16, 0.18, 0.20, 0.30, 0.45,
+        # b12–17  6am–9am: opening, morning warmup
+        0.80, 1.00, 1.20, 1.40, 1.55, 1.65,
+        # b18–23  9am–12pm: building heat load
+        1.75, 1.85, 1.95, 2.05, 2.15, 2.30,
+        # b24–29  12pm–3pm: midday heat rising
+        2.45, 2.55, 2.65, 2.75, 2.80, 2.85,
+        # b30–35  3pm–6pm  TOU PEAK: hottest part of day
+        2.90, 3.00, 3.05, 3.00, 2.95, 2.85,
+        # b36–41  6pm–9pm  TOU PEAK: cooling but still warm
+        2.70, 2.50, 2.30, 2.10, 1.90, 1.70,
+        # b42–47  9pm–midnight: wind-down
+        1.30, 1.00, 0.70, 0.50, 0.35, 0.25,
+    ],
+    # Fridges: run 24/7, higher during service hours and warm afternoon
+    "Fridges": [
+        # b0–11  midnight–6am: steady overnight cycling
+        0.82, 0.80, 0.78, 0.78, 0.76, 0.76, 0.78, 0.78, 0.80, 0.82, 0.88, 0.95,
+        # b12–17  6am–9am: morning deliveries, door activity
+        1.05, 1.10, 1.20, 1.25, 1.35, 1.45,
+        # b18–23  9am–12pm: busy service, frequent openings
+        1.55, 1.60, 1.65, 1.70, 1.72, 1.75,
+        # b24–29  12pm–3pm: lunch rush, peak door activity
+        1.82, 1.85, 1.80, 1.75, 1.68, 1.62,
+        # b30–35  3pm–6pm  TOU PEAK: warm ambient, still operating
+        1.68, 1.72, 1.72, 1.68, 1.62, 1.55,
+        # b36–41  6pm–9pm  TOU PEAK: tapering
+        1.48, 1.42, 1.35, 1.28, 1.18, 1.10,
+        # b42–47  9pm–midnight: closing cleanup
+        1.02, 0.95, 0.90, 0.86, 0.83, 0.82,
+    ],
+    # Ovens: pre-heat 5am, full operation breakfast + lunch, mostly done by 3pm
+    "Ovens": [
+        # b0–11  midnight–6am: off overnight
+        0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.35, 0.70,
+        # b12–17  6am–9am: pre-heat then full breakfast operation
+        2.10, 2.50, 2.80, 2.95, 3.00, 2.95,
+        # b18–23  9am–12pm: morning bakes, tapering toward lunch
+        2.85, 2.75, 2.60, 2.45, 2.30, 2.10,
+        # b24–29  12pm–3pm: lunch service, winding down
+        1.85, 1.55, 1.20, 0.90, 0.65, 0.50,
+        # b30–35  3pm–6pm  TOU PEAK: very low (small afternoon batch only)
+        0.45, 0.40, 0.35, 0.35, 0.40, 0.35,
+        # b36–41  6pm–9pm  TOU PEAK: essentially off
+        0.20, 0.15, 0.12, 0.12, 0.10, 0.10,
+        # b42–47  9pm–midnight: off
+        0.10, 0.10, 0.10, 0.10, 0.10, 0.10,
+    ],
+    # Espresso: dominant morning rush, real afternoon coffee trade 3–5pm
+    "Espresso": [
+        # b0–11  midnight–6am: standby/off
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.15, 0.40,
+        # b12–17  6am–9am: warm-up then morning rush building
+        0.70, 0.90, 1.30, 1.60, 1.85, 1.90,
+        # b18–23  9am–12pm: morning rush peak then easing
+        1.85, 1.75, 1.60, 1.45, 1.20, 1.00,
+        # b24–29  12pm–3pm: lunch crowd, slowing toward afternoon
+        0.85, 0.75, 0.65, 0.58, 0.52, 0.50,
+        # b30–35  3pm–6pm  TOU PEAK: afternoon coffee trade (real!)
+        0.55, 0.65, 0.70, 0.68, 0.62, 0.55,
+        # b36–41  6pm–9pm  TOU PEAK: evening wind-down
+        0.42, 0.32, 0.22, 0.15, 0.10, 0.08,
+        # b42–47  9pm–midnight: off
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+    ],
+    # Hot Water: morning peak for coffee service and cleaning
+    "Hot Water": [
+        # b0–11  midnight–6am: minimal
+        0.10, 0.10, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.10, 0.10, 0.25, 0.45,
+        # b12–17  6am–9am: heating up, morning service
+        0.65, 0.70, 0.88, 0.95, 1.05, 1.08,
+        # b18–23  9am–12pm: full service
+        0.95, 0.88, 0.78, 0.72, 0.65, 0.60,
+        # b24–29  12pm–3pm: post-lunch cleanup
+        0.58, 0.55, 0.52, 0.50, 0.48, 0.45,
+        # b30–35  3pm–6pm  TOU PEAK: low
+        0.42, 0.40, 0.38, 0.36, 0.32, 0.28,
+        # b36–41  6pm–9pm  TOU PEAK: minimal
+        0.22, 0.18, 0.15, 0.12, 0.12, 0.10,
+        # b42–47  9pm–midnight: off
+        0.10, 0.10, 0.10, 0.10, 0.10, 0.10,
+    ],
+    # Dishwasher: post-rush cycles — importantly runs through afternoon TOU window
+    "Dishwasher": [
+        # b0–15  midnight–8am: off
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+        # b16–21  8am–11am: post-breakfast wash cycles
+        0.45, 0.70, 0.85, 0.75, 0.60, 0.40,
+        # b22–29  11am–3pm: post-lunch heavy cycle
+        0.25, 0.20, 0.65, 0.85, 1.00, 1.05, 0.95, 0.80,
+        # b30–35  3pm–6pm  TOU PEAK: afternoon cleanup cycles
+        0.65, 0.50, 0.40, 0.40, 0.50, 0.60,
+        # b36–41  6pm–9pm  TOU PEAK: end-of-day wash
+        0.65, 0.70, 0.55, 0.35, 0.20, 0.10,
+        # b42–47  9pm–midnight: off
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+    ],
+    # Lighting: security overnight, full during trading hours
+    "Lighting": [
+        # b0–11  midnight–6am: security lights only
+        0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.12, 0.18,
+        # b12–17  6am–9am: opening lights on
+        0.55, 0.60, 0.65, 0.65, 0.65, 0.65,
+        # b18–23  9am–12pm: full trading
+        0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+        # b24–29  12pm–3pm: full trading
+        0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+        # b30–35  3pm–6pm  TOU PEAK: full trading
+        0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+        # b36–41  6pm–9pm  TOU PEAK: closing, lights dimming
+        0.62, 0.58, 0.50, 0.40, 0.30, 0.20,
+        # b42–47  9pm–midnight: security only
+        0.12, 0.10, 0.08, 0.08, 0.08, 0.08,
+    ],
+    # Misc: POS, tablets, displays — flat during trading hours
+    "Misc": [
+        # b0–11  midnight–6am: minimal
+        0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.06, 0.08,
+        # b12–17  6am–9am: systems coming online
+        0.20, 0.22, 0.28, 0.30, 0.30, 0.30,
+        # b18–23  9am–12pm: full operation
+        0.30, 0.30, 0.30, 0.30, 0.30, 0.30,
+        # b24–29  12pm–3pm: full operation
+        0.30, 0.30, 0.30, 0.30, 0.30, 0.28,
+        # b30–35  3pm–6pm  TOU PEAK: still operating
+        0.28, 0.28, 0.28, 0.28, 0.28, 0.28,
+        # b36–41  6pm–9pm  TOU PEAK: closing down
+        0.25, 0.22, 0.18, 0.15, 0.10, 0.08,
+        # b42–47  9pm–midnight: standby
+        0.05, 0.05, 0.04, 0.04, 0.04, 0.04,
+    ],
+}
+
+# Validate all profiles are exactly 48 buckets
+for _app, _curve in CAFE_APPLIANCE_PROFILES.items():
+    assert len(_curve) == 48, f"CAFE_APPLIANCE_PROFILES[{_app!r}] has {len(_curve)} buckets, need 48"
+
+# Site types that have realistic per-appliance profiles (others fall back to weights)
+APPLIANCE_PROFILES_BY_SITE: Dict[str, Dict[str, List[float]]] = {
+    "cafe": CAFE_APPLIANCE_PROFILES,
+}
+
 # ── Synthetic profiles by site_type (48 half-hourly kW values) ───────────────
+# Cafe total is derived from the sum of its appliance profiles so they stay consistent.
+
+def _sum_appliance_profiles(profiles: Dict[str, List[float]]) -> List[float]:
+    total = [0.0] * 48
+    for curve in profiles.values():
+        for i, v in enumerate(curve):
+            total[i] += v
+    return [round(v, 4) for v in total]
 
 SYNTHETIC_PROFILES: Dict[str, List[float]] = {
-    "cafe": [
-        0.8, 0.8, 0.6, 0.6, 0.6, 0.8,
-        2.1, 3.2, 4.1, 4.8,
-        5.2, 5.6, 5.8, 5.6, 5.0, 4.6,
-        4.2, 4.4, 4.6, 4.8,
-        5.1, 5.4, 5.6, 5.4,
-        4.9, 4.2, 3.6,
-        2.8, 2.1, 1.5, 1.2,
-        1.0, 0.9, 0.8, 0.8, 0.7, 0.7,
-        0.7, 0.7, 0.8, 0.8, 0.8, 0.8,
-        0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
-    ],
+    "cafe": _sum_appliance_profiles(CAFE_APPLIANCE_PROFILES),
     "office": [
         1.2, 1.1, 1.0, 0.9, 0.9, 1.0, 1.2,
         2.5, 3.8,
@@ -124,16 +273,25 @@ def _get_synthetic_profile(site_type: str) -> List[float]:
 # ── Appliance split ───────────────────────────────────────────────────────────
 
 APPLIANCE_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "cafe": {"Fridges": 0.22, "Espresso": 0.12, "Ovens": 0.18, "HVAC": 0.20, "Lighting": 0.08, "Dishwasher": 0.08, "Hot Water": 0.07, "Misc": 0.05},
-    "office": {"Fridges": 0.06, "Espresso": 0.04, "Ovens": 0.02, "HVAC": 0.45, "Lighting": 0.20, "Dishwasher": 0.02, "Hot Water": 0.05, "Misc": 0.16},
-    "retail": {"Fridges": 0.20, "Espresso": 0.03, "Ovens": 0.05, "HVAC": 0.30, "Lighting": 0.25, "Dishwasher": 0.02, "Hot Water": 0.03, "Misc": 0.12},
-    "industrial": {"Fridges": 0.05, "Espresso": 0.01, "Ovens": 0.05, "HVAC": 0.15, "Lighting": 0.10, "Dishwasher": 0.02, "Hot Water": 0.05, "Misc": 0.57},
+    "office":      {"Fridges": 0.06, "Espresso": 0.04, "Ovens": 0.02, "HVAC": 0.45, "Lighting": 0.20, "Dishwasher": 0.02, "Hot Water": 0.05, "Misc": 0.16},
+    "retail":      {"Fridges": 0.20, "Espresso": 0.03, "Ovens": 0.05, "HVAC": 0.30, "Lighting": 0.25, "Dishwasher": 0.02, "Hot Water": 0.03, "Misc": 0.12},
+    "industrial":  {"Fridges": 0.05, "Espresso": 0.01, "Ovens": 0.05, "HVAC": 0.15, "Lighting": 0.10, "Dishwasher": 0.02, "Hot Water": 0.05, "Misc": 0.57},
     "hospitality": {"Fridges": 0.18, "Espresso": 0.06, "Ovens": 0.22, "HVAC": 0.22, "Lighting": 0.10, "Dishwasher": 0.09, "Hot Water": 0.08, "Misc": 0.05},
 }
 
 
 def _split_appliance_curves(load_curve: List[float], site_type: str) -> Dict[str, List[float]]:
-    weights = APPLIANCE_WEIGHTS.get(site_type.lower(), APPLIANCE_WEIGHTS["cafe"])
+    stype = site_type.lower()
+    # For site types with realistic per-appliance profiles, scale them to match
+    # the input load curve's total energy (handles store-level scaling).
+    if stype in APPLIANCE_PROFILES_BY_SITE:
+        profiles = APPLIANCE_PROFILES_BY_SITE[stype]
+        base_sum = sum(v for curve in profiles.values() for v in curve)
+        input_sum = sum(load_curve)
+        scale = (input_sum / base_sum) if base_sum > 0 else 1.0
+        return {name: [round(v * scale, 4) for v in curve] for name, curve in profiles.items()}
+    # Fallback: proportional weight split
+    weights = APPLIANCE_WEIGHTS.get(stype, APPLIANCE_WEIGHTS["office"])
     return {name: [round(load_curve[b] * w, 4) for b in range(len(load_curve))] for name, w in weights.items()}
 
 
