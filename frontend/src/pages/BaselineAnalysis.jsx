@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, ArrowRight, AlertCircle, Layers, Store } from 'lucide-react';
+import { ChevronRight, ArrowRight, AlertCircle, Layers, Store, Zap, TrendingUp, Clock, BarChart2 } from 'lucide-react';
 import { getBaseline, getClient, fmtCurrency, fmtNumber, fmtPct } from '../lib/api';
 import StackedAreaChart, { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import RetailerTable from '../components/RetailerTable';
@@ -16,9 +16,9 @@ const COST_COLORS = {
 };
 
 const COST_LABELS = {
-  energy_peak:    'Energy — Peak',
-  energy_shoulder:'Energy — Shoulder',
-  energy_offpeak: 'Energy — Off-peak',
+  energy_peak:    'Peak energy',
+  energy_shoulder:'Shoulder energy',
+  energy_offpeak: 'Off-peak energy',
   demand_charge:  'Demand charge',
   network:        'Network',
   fixed_supply:   'Fixed supply',
@@ -34,10 +34,7 @@ function CostStackChart({ costStack }) {
     { key: 'demand_charge',  value: costStack.demand_charge },
     {
       key: 'network',
-      value:
-        (costStack.network_distribution || 0) +
-        (costStack.network_transmission  || 0) +
-        (costStack.network_metering      || 0),
+      value: (costStack.network_distribution || 0) + (costStack.network_transmission || 0) + (costStack.network_metering || 0),
     },
     { key: 'fixed_supply',   value: costStack.fixed_supply },
     { key: 'environmental',  value: costStack.environmental },
@@ -47,47 +44,52 @@ function CostStackChart({ costStack }) {
   const maxVal = Math.max(...items.map((i) => i.value));
 
   return (
-    <div className="space-y-2" data-testid="cost-stack-chart">
+    <div className="space-y-2.5" data-testid="cost-stack-chart">
       {items.map((item) => {
-        const pct    = (item.value / total)  * 100;
+        const pct    = (item.value / total) * 100;
         const barPct = (item.value / maxVal) * 100;
         return (
           <div key={item.key} className="flex items-center gap-3">
-            <div className="w-32 text-right text-xs text-ink-soft flex-shrink-0">{COST_LABELS[item.key]}</div>
-            <div className="flex-1 bg-cream-200 rounded-full h-4 relative overflow-hidden">
-              <div className="h-full rounded-full transition-all" style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key], opacity: 0.9 }} />
+            <div className="w-28 text-right text-[11px] text-ink-soft flex-shrink-0 leading-tight">{COST_LABELS[item.key]}</div>
+            <div className="flex-1 bg-cream-200 rounded-full h-3.5 relative overflow-hidden">
+              <div className="h-full rounded-full" style={{ width: `${barPct}%`, backgroundColor: COST_COLORS[item.key] }} />
             </div>
-            <div className="w-20 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">{fmtCurrency(item.value)}</div>
-            <div className="w-10 text-right text-[11px] text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
+            <div className="w-16 text-right text-xs font-semibold text-forest-900 tabnum flex-shrink-0">{fmtCurrency(item.value)}</div>
+            <div className="w-8 text-right text-[10px] text-ink-mute tabnum flex-shrink-0">{pct.toFixed(0)}%</div>
           </div>
         );
       })}
-      <div className="flex items-center gap-3 border-t border-line pt-3 mt-2">
-        <div className="w-32 text-right text-xs font-semibold text-forest-900">Total annual</div>
+      <div className="flex items-center gap-3 border-t-2 border-forest-900/10 pt-3 mt-1">
+        <div className="w-28 text-right text-xs font-bold text-forest-900">Total / year</div>
         <div className="flex-1" />
-        <div className="w-20 text-right text-base font-bold text-violet tabnum flex-shrink-0">{fmtCurrency(total)}</div>
-        <div className="w-10 text-right text-[11px] text-ink-mute tabnum">100%</div>
+        <div className="w-16 text-right text-lg font-bold text-violet tabnum">{fmtCurrency(total)}</div>
+        <div className="w-8" />
       </div>
     </div>
   );
 }
 
-function MetricCard({ label, value, unit, hint, accent = 'forest', testId }) {
-  const accentClass = {
-    forest: 'text-forest-800',
-    violet: 'text-violet',
-    lime:   'text-lime-700',
-    amber:  'text-amber-600',
-    red:    'text-red-600',
-  }[accent];
+function KpiStrip({ metrics, costStack }) {
+  const total = costStack?.total_annual || 0;
+  const kpis = [
+    { icon: <Zap size={16} className="text-amber-500" />,    label: 'Annual usage',      value: fmtNumber((metrics.annual_kwh || 0) / 1000, 1), unit: 'MWh' },
+    { icon: <TrendingUp size={16} className="text-red-500" />, label: 'Peak demand',      value: fmtNumber(metrics.peak_kw || 0, 1),             unit: 'kW'  },
+    { icon: <Clock size={16} className="text-violet" />,      label: 'In TOU peak',       value: fmtPct(metrics.peak_coincidence || 0, 0),       unit: ''    },
+    { icon: <BarChart2 size={16} className="text-forest-600" />, label: 'Load factor',   value: fmtPct(metrics.load_factor || 0, 0),            unit: ''    },
+    { icon: <span className="text-sm font-bold text-forest-700">$</span>, label: 'Annual cost', value: fmtCurrency(total), unit: '/yr' },
+  ];
   return (
-    <div className="bg-cream-50 border border-line rounded-2xl p-4 shadow-card" data-testid={testId}>
-      <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">{label}</p>
-      <p className={`text-2xl font-display tabnum ${accentClass}`}>
-        {value}
-        {unit && <span className="text-sm font-normal text-ink-mute ml-1">{unit}</span>}
-      </p>
-      {hint && <p className="text-xs text-ink-mute mt-1">{hint}</p>}
+    <div className="grid grid-cols-2 sm:grid-cols-5 divide-x divide-line border border-line rounded-2xl bg-cream-50 shadow-card mb-6 overflow-hidden">
+      {kpis.map((k, i) => (
+        <div key={i} className="flex flex-col items-center justify-center py-4 px-3 text-center gap-1">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-mute">
+            {k.icon} {k.label}
+          </div>
+          <div className="font-display text-xl text-forest-900 tabnum leading-tight">
+            {k.value}{k.unit && <span className="text-xs font-normal text-ink-mute ml-0.5">{k.unit}</span>}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -96,16 +98,14 @@ export default function BaselineAnalysis() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [client,      setClient]   = useState(null);
-  const [baseline,    setBaseline] = useState(null);
-  const [loading,     setLoading]  = useState(true);
-  const [error,       setError]    = useState('');
-  const [storeContext, setStoreContext] = useState(null); // {type, store_ids, store_names, baseline}
+  const [client,       setClient]       = useState(null);
+  const [baseline,     setBaseline]     = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState('');
+  const [storeContext, setStoreContext] = useState(null);
 
   useEffect(() => {
     if (!id) return;
-
-    // Check if we arrived from the store portfolio with a pre-loaded context
     const raw = sessionStorage.getItem(`store_context_${id}`);
     const ctx = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
 
@@ -113,7 +113,6 @@ export default function BaselineAnalysis() {
       setStoreContext(ctx);
       setBaseline(ctx.baseline);
       setLoading(false);
-      // Still fetch client name
       getClient(id).then((r) => {
         setClient(r.data);
         sessionStorage.setItem(`client_name_${id}`, r.data.name);
@@ -138,7 +137,6 @@ export default function BaselineAnalysis() {
   }, [id]);
 
   const handleBuildScenarios = () => {
-    // Pass store context to scenarios page via sessionStorage
     if (storeContext) {
       sessionStorage.setItem(`scenario_store_context_${id}`, JSON.stringify(storeContext));
     } else {
@@ -171,145 +169,137 @@ export default function BaselineAnalysis() {
         <span className="text-violet font-medium">Baseline</span>
       </div>
 
+      {/* Header */}
       {client && (
-        <div className="mb-6">
-          <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
-        </div>
-      )}
-
-      {/* Store context banner */}
-      {storeContext && (
-        <div className={`flex items-center gap-3 rounded-xl px-4 py-3 mb-6 border text-sm ${
-          storeContext.type === 'aggregate'
-            ? 'bg-violet/8 border-violet/30 text-violet-900'
-            : 'bg-forest-50 border-forest-200 text-forest-900'
-        }`}>
-          {storeContext.type === 'aggregate'
-            ? <Layers size={15} className="text-violet flex-shrink-0" />
-            : <Store size={15} className="text-forest-700 flex-shrink-0" />}
-          <span>
-            {storeContext.type === 'aggregate' ? (
-              <>
-                <span className="font-semibold">Aggregate view</span>
-                {' — '}
-                {storeContext.store_names.join(' + ')}
-              </>
-            ) : (
-              <>
-                <span className="font-semibold">Single store</span>
-                {' — '}
-                {storeContext.store_names[0]}
-              </>
+        <div className="flex items-end justify-between mb-6 gap-4">
+          <div>
+            <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
+            {storeContext && (
+              <div className={`inline-flex items-center gap-2 mt-2 text-xs px-3 py-1 rounded-full border ${
+                storeContext.type === 'aggregate'
+                  ? 'bg-violet/8 border-violet/30 text-violet-800'
+                  : 'bg-forest-50 border-forest-200 text-forest-800'
+              }`}>
+                {storeContext.type === 'aggregate'
+                  ? <Layers size={12} className="text-violet" />
+                  : <Store size={12} className="text-forest-600" />}
+                <span className="font-medium">
+                  {storeContext.type === 'aggregate'
+                    ? storeContext.store_names.join(' + ')
+                    : storeContext.store_names[0]}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    sessionStorage.removeItem(`store_context_${id}`);
+                    setStoreContext(null);
+                    setLoading(true);
+                    Promise.all([getClient(id), getBaseline(id)]).then(([c, b]) => {
+                      setClient(c.data); setBaseline(b.data);
+                    }).finally(() => setLoading(false));
+                  }}
+                  className="text-ink-mute hover:text-red-600 ml-1"
+                >
+                  ×
+                </button>
+              </div>
             )}
-          </span>
+          </div>
           <button
-            type="button"
-            onClick={() => {
-              sessionStorage.removeItem(`store_context_${id}`);
-              setStoreContext(null);
-              setLoading(true);
-              Promise.all([getClient(id), getBaseline(id)]).then(([c, b]) => {
-                setClient(c.data);
-                setBaseline(b.data);
-              }).finally(() => setLoading(false));
-            }}
-            className="ml-auto text-[11px] text-ink-mute hover:text-red-600 underline"
+            onClick={handleBuildScenarios}
+            data-testid="build-scenarios-btn"
+            className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-6 py-2.5 text-sm transition-all flex-shrink-0"
           >
-            Clear
+            Build Scenarios <ArrowRight size={14} />
           </button>
         </div>
       )}
 
-      {loading && (
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          <div className="lg:col-span-3 h-96 bg-cream-100 rounded-2xl animate-pulse" />
-          <div className="lg:col-span-2 h-96 bg-cream-100 rounded-2xl animate-pulse" />
-        </div>
-      )}
-
       {!loading && error && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm mb-6">
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
-      {!loading && baseline && (
-        <>
-          {/* Row 1: Stacked load chart + cost stack */}
-          <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-            <div className="lg:col-span-3 space-y-4">
-              <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6">
-                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider mb-4">
-                  Hourly Load — Typical Weekday
-                </h2>
+      {loading && (
+        <div className="space-y-4">
+          <div className="h-20 bg-cream-100 rounded-2xl animate-pulse" />
+          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-3 h-96 bg-cream-100 rounded-2xl animate-pulse" />
+            <div className="lg:col-span-2 h-96 bg-cream-100 rounded-2xl animate-pulse" />
+          </div>
+        </div>
+      )}
 
+      {!loading && baseline && (
+        <div className="space-y-4">
+          {/* KPI strip — full width */}
+          <KpiStrip metrics={metrics} costStack={costStack} />
+
+          {/* Main body: load chart (left) + cost breakdown (right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+
+            {/* Load chart */}
+            <div className="lg:col-span-3 bg-cream-50 border border-line rounded-2xl shadow-card overflow-hidden">
+              <div className="px-6 pt-5 pb-3 border-b border-line">
+                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">Hourly Load — Typical Weekday</h2>
+                <p className="text-xs text-ink-mute mt-0.5">Half-hourly average kW by appliance</p>
+              </div>
+              <div className="p-6">
                 <StackedAreaChart
                   applianceCurves={appCurves}
                   scales={{}}
-                  height={300}
+                  height={280}
                   showLegend={false}
                   testId="baseline-stacked-chart"
                 />
-
-                {activeAppliances.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-3">Appliances</p>
-                    <div className="flex flex-wrap gap-2">
-                      {activeAppliances.map(({ key, color }) => (
-                        <span
-                          key={key}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-line bg-white text-[11px] font-medium text-forest-900"
-                        >
-                          <span className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: color }} />
-                          {key}
-                        </span>
-                      ))}
-                    </div>
+              </div>
+              {activeAppliances.length > 0 && (
+                <div className="px-6 pb-5 border-t border-line pt-4">
+                  <div className="flex flex-wrap gap-2">
+                    {activeAppliances.map(({ key, color }) => (
+                      <span
+                        key={key}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white border border-line text-[11px] font-medium text-forest-900"
+                      >
+                        <span className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: color }} />
+                        {key}
+                      </span>
+                    ))}
                   </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <MetricCard label="Load Factor"      value={fmtPct(metrics.load_factor      || 0, 0)} hint="Avg ÷ peak"     accent="forest" testId="metric-load-factor" />
-                <MetricCard label="Peak Demand"      value={fmtNumber(metrics.peak_kw       || 0, 1)} unit="kW"            accent="amber"  testId="metric-peak-kw" />
-                <MetricCard label="Peak Coincidence" value={fmtPct(metrics.peak_coincidence || 0, 0)} hint="Load in 3–9pm" accent="red"    testId="metric-peak-coincidence" />
-                <MetricCard label="Annual"           value={fmtNumber((metrics.annual_kwh   || 0) / 1000, 1)} unit="MWh"  accent="violet" testId="metric-annual-kwh" />
-              </div>
+                </div>
+              )}
             </div>
 
-            <div className="lg:col-span-2 space-y-4">
-              <div className="bg-cream-50 border border-line rounded-2xl shadow-card p-6">
-                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider mb-5">Annual Cost</h2>
+            {/* Cost breakdown */}
+            <div className="lg:col-span-2 bg-cream-50 border border-line rounded-2xl shadow-card overflow-hidden flex flex-col">
+              <div className="px-6 pt-5 pb-3 border-b border-line">
+                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">Annual Cost Breakdown</h2>
+                <p className="text-xs text-ink-mute mt-0.5">By tariff component</p>
+              </div>
+              <div className="p-6 flex-1">
                 <CostStackChart costStack={costStack} />
               </div>
             </div>
           </div>
 
-          {/* Row 2: Retailer pricing */}
+          {/* Retailer table — full width */}
           {retailerComp && (
-            <div className="mt-6 bg-cream-50 border border-line rounded-2xl shadow-card p-6" data-testid="baseline-retailer-section">
-              <div className="flex items-baseline justify-between mb-4">
-                <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">
-                  Retailer Pricing — for this load shape
-                </h2>
-                <span className="text-[11px] text-ink-mute">5 AU plans · rates in c/kWh</span>
+            <div className="bg-cream-50 border border-line rounded-2xl shadow-card overflow-hidden" data-testid="baseline-retailer-section">
+              <div className="px-6 pt-5 pb-3 border-b border-line flex items-baseline justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-forest-900 uppercase tracking-wider">Retailer Comparison</h2>
+                  <p className="text-xs text-ink-mute mt-0.5">Modelled on this load shape · rates in c/kWh</p>
+                </div>
+                <span className="text-[11px] text-ink-mute">5 AU plans</span>
               </div>
-              <RetailerTable data={retailerComp} />
+              <div className="p-6">
+                <RetailerTable data={retailerComp} />
+              </div>
             </div>
           )}
-
-          <div className="mt-8 flex justify-end">
-            <button
-              onClick={handleBuildScenarios}
-              data-testid="build-scenarios-btn"
-              className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-6 py-3 text-sm transition-all"
-            >
-              Build Scenarios
-              <ArrowRight size={15} />
-            </button>
-          </div>
-        </>
+        </div>
       )}
     </div>
   );

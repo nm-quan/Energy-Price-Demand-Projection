@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ChevronRight, MapPin, Zap, DollarSign, Check, Loader, AlertCircle,
-  BarChart3, Layers, Plus, Trash2, Store,
+  BarChart3, Layers, Trash2, Store, CheckSquare, X,
 } from 'lucide-react';
 import { getClient, listStores, deleteStore, getStoreBaseline, getAggregateBaseline, fmtCurrency, fmtNumber } from '../lib/api';
 
@@ -23,32 +23,30 @@ function SiteTypeBadge({ type }) {
   );
 }
 
-function StoreCard({ store, selected, onToggle, onDelete }) {
+function StoreCard({ store, selectionMode, selected, onToggle, onDelete, onClick }) {
   return (
     <div
       data-testid={`store-card-${store.id}`}
-      className={`group relative bg-cream-50 border rounded-2xl p-5 transition-all ${
-        selected
+      onClick={selectionMode ? onToggle : onClick}
+      className={`group relative bg-cream-50 border rounded-2xl p-5 transition-all cursor-pointer ${
+        selectionMode && selected
           ? 'border-violet ring-2 ring-violet/30 bg-violet/5'
-          : 'border-line hover:shadow-card'
+          : selectionMode
+          ? 'border-line hover:border-violet/50'
+          : 'border-line hover:shadow-card hover:border-forest-300'
       }`}
     >
-      {/* Select button */}
-      <button
-        type="button"
-        onClick={onToggle}
-        data-testid={`select-store-${store.id}`}
-        className={`absolute top-4 right-4 inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-all ${
-          selected
-            ? 'bg-violet border-violet text-white'
-            : 'bg-cream-50 border-line text-ink-mute hover:border-violet hover:text-violet'
-        }`}
-      >
-        {selected ? <><Check size={11} strokeWidth={3} />Selected</> : 'Select'}
-      </button>
+      {/* Selection checkbox (only in selection mode) */}
+      {selectionMode && (
+        <div className={`absolute top-4 right-4 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+          selected ? 'bg-violet border-violet' : 'bg-cream-50 border-line'
+        }`}>
+          {selected && <Check size={11} strokeWidth={3} className="text-white" />}
+        </div>
+      )}
 
       {/* Store name + badge */}
-      <div className="pr-20 mb-3">
+      <div className={`mb-3 ${selectionMode ? 'pr-8' : 'pr-4'}`}>
         <div className="flex items-center gap-2 mb-1">
           <SiteTypeBadge type={store.site_type} />
         </div>
@@ -86,15 +84,17 @@ function StoreCard({ store, selected, onToggle, onDelete }) {
         )}
       </div>
 
-      {/* Delete button */}
-      <button
-        type="button"
-        data-testid={`delete-store-${store.id}`}
-        onClick={() => onDelete(store.id)}
-        className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-ink-mute hover:text-red-600 p-1 rounded"
-      >
-        <Trash2 size={13} />
-      </button>
+      {/* Delete button — only in normal mode */}
+      {!selectionMode && (
+        <button
+          type="button"
+          data-testid={`delete-store-${store.id}`}
+          onClick={(e) => { e.stopPropagation(); onDelete(store.id); }}
+          className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-ink-mute hover:text-red-600 p-1 rounded"
+        >
+          <Trash2 size={13} />
+        </button>
+      )}
     </div>
   );
 }
@@ -103,12 +103,13 @@ export default function StorePortfolio() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [client,     setClient]     = useState(null);
-  const [stores,     setStores]     = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [analysing,  setAnalysing]  = useState(false);
-  const [error,      setError]      = useState('');
-  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [client,        setClient]        = useState(null);
+  const [stores,        setStores]        = useState([]);
+  const [loading,       setLoading]       = useState(true);
+  const [analysing,     setAnalysing]     = useState(false);
+  const [error,         setError]         = useState('');
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds,   setSelectedIds]   = useState(new Set());
 
   useEffect(() => {
     if (!id) return;
@@ -136,24 +137,45 @@ export default function StorePortfolio() {
     });
   };
 
+  const handleClickStore = async (store) => {
+    setAnalysing(true);
+    setError('');
+    try {
+      const res = await getStoreBaseline(id, store.id);
+      sessionStorage.setItem(
+        `store_context_${id}`,
+        JSON.stringify({
+          type: 'single',
+          store_ids: [store.id],
+          store_names: [store.name],
+          baseline: res.data,
+        })
+      );
+      navigate(`/clients/${id}/baseline`);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load store baseline.');
+      setAnalysing(false);
+    }
+  };
+
   const handleDeleteStore = async (storeId) => {
     try {
       await deleteStore(id, storeId);
       setStores((cur) => cur.filter((s) => s.id !== storeId));
       setSelectedIds((cur) => { const next = new Set(cur); next.delete(storeId); return next; });
-    } catch (err) {
+    } catch {
       setError('Failed to delete store.');
     }
   };
 
-  const handleAnalyse = async () => {
+  const handleAnalyseSelected = async () => {
     if (selectedIds.size === 0) return;
     setAnalysing(true);
     setError('');
     try {
-      const storeIdList = Array.from(selectedIds);
+      const storeIdList    = Array.from(selectedIds);
       const selectedStores = stores.filter((s) => selectedIds.has(s.id));
-      const storeNames = selectedStores.map((s) => s.name);
+      const storeNames     = selectedStores.map((s) => s.name);
 
       let baseline;
       if (storeIdList.length === 1) {
@@ -176,9 +198,13 @@ export default function StorePortfolio() {
       navigate(`/clients/${id}/baseline`);
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to load analysis. Try again.');
-    } finally {
       setAnalysing(false);
     }
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
   };
 
   const selectedCount = selectedIds.size;
@@ -199,15 +225,32 @@ export default function StorePortfolio() {
         <div className="flex items-end justify-between mb-8 gap-4">
           <div>
             <h1 className="font-display text-5xl text-forest-900 leading-none">{client.name}</h1>
-            <p className="text-sm text-ink-soft mt-2">Select one or more stores to analyse their load profile and run scenarios.</p>
+            <p className="text-sm text-ink-soft mt-2">
+              {selectionMode
+                ? 'Select stores to compare or aggregate their load profiles.'
+                : 'Click a store to open its dashboard, or use Select to group stores.'}
+            </p>
           </div>
-          <button
-            type="button"
-            onClick={() => navigate(`/clients/${id}/baseline`)}
-            className="text-xs text-ink-mute hover:text-violet transition-colors flex items-center gap-1.5 flex-shrink-0"
-          >
-            <BarChart3 size={13} /> View full-chain baseline
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {selectionMode ? (
+              <button
+                type="button"
+                onClick={exitSelectionMode}
+                className="inline-flex items-center gap-1.5 text-xs text-ink-mute hover:text-red-600 border border-line rounded-full px-3 py-1.5 transition-colors"
+              >
+                <X size={12} /> Cancel
+              </button>
+            ) : (
+              <button
+                type="button"
+                data-testid="select-stores-btn"
+                onClick={() => setSelectionMode(true)}
+                className="inline-flex items-center gap-1.5 text-xs text-forest-700 hover:text-violet border border-line hover:border-violet rounded-full px-3 py-1.5 transition-colors"
+              >
+                <CheckSquare size={13} /> Select stores
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -238,42 +281,52 @@ export default function StorePortfolio() {
 
       {!loading && stores.length > 0 && (
         <>
-          {/* Select all / deselect toggle */}
           <div className="flex items-center justify-between mb-4">
             <p className="text-xs text-ink-mute">
-              <span className="font-semibold text-forest-800">{stores.length}</span> store{stores.length !== 1 ? 's' : ''} ·{' '}
-              <span className="font-semibold text-violet">{selectedCount}</span> selected
+              <span className="font-semibold text-forest-800">{stores.length}</span> store{stores.length !== 1 ? 's' : ''}
+              {selectionMode && (
+                <> · <span className="font-semibold text-violet">{selectedCount}</span> selected</>
+              )}
             </p>
-            <button
-              type="button"
-              onClick={() =>
-                selectedCount === stores.length
-                  ? setSelectedIds(new Set())
-                  : setSelectedIds(new Set(stores.map((s) => s.id)))
-              }
-              className="text-xs text-violet hover:text-violet-700 font-medium"
-            >
-              {selectedCount === stores.length ? 'Deselect all' : 'Select all'}
-            </button>
+            {selectionMode && (
+              <button
+                type="button"
+                onClick={() =>
+                  selectedCount === stores.length
+                    ? setSelectedIds(new Set())
+                    : setSelectedIds(new Set(stores.map((s) => s.id)))
+                }
+                className="text-xs text-violet hover:text-violet-700 font-medium"
+              >
+                {selectedCount === stores.length ? 'Deselect all' : 'Select all'}
+              </button>
+            )}
           </div>
 
-          {/* Store grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-32">
+          {analysing && (
+            <div className="flex items-center gap-2 text-xs text-ink-mute mb-4">
+              <Loader size={13} className="animate-spin text-violet" /> Loading baseline…
+            </div>
+          )}
+
+          <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 ${selectionMode ? 'pb-32' : ''}`}>
             {stores.map((store) => (
               <StoreCard
                 key={store.id}
                 store={store}
+                selectionMode={selectionMode}
                 selected={selectedIds.has(store.id)}
                 onToggle={() => toggleStore(store.id)}
                 onDelete={handleDeleteStore}
+                onClick={() => handleClickStore(store)}
               />
             ))}
           </div>
         </>
       )}
 
-      {/* Sticky action bar */}
-      {selectedCount > 0 && (
+      {/* Sticky action bar — only in selection mode with stores selected */}
+      {selectionMode && selectedCount > 0 && (
         <div className="fixed bottom-0 left-60 right-0 z-20 px-10 py-4 bg-cream-50/90 border-t border-line backdrop-blur-sm">
           <div className="max-w-7xl mx-auto flex items-center justify-between gap-6">
             <div className="flex items-center gap-6">
@@ -299,7 +352,7 @@ export default function StorePortfolio() {
 
             <button
               type="button"
-              onClick={handleAnalyse}
+              onClick={handleAnalyseSelected}
               disabled={analysing}
               data-testid="analyse-selection-btn"
               className="btn-violet inline-flex items-center gap-2 font-semibold rounded-full px-6 py-2.5 text-sm transition-all disabled:opacity-50"
