@@ -19,16 +19,6 @@ const HINT_PROMPTS = [
   'Overnight shift only',
 ];
 
-function getAfterApplianceCurves(scenario) {
-  const after = { ...(scenario.baseline_appliance_curves || {}) };
-  for (const change of (scenario.appliance_changes || [])) {
-    if (change.after_curve && change.appliance) {
-      after[change.appliance] = change.after_curve;
-    }
-  }
-  return after;
-}
-
 // ── Appliance before/after bars ──────────────────────────────────────────────
 function ApplianceChangeBars({ changes }) {
   if (!changes || changes.length === 0) return null;
@@ -209,6 +199,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
                     <HourlyLineChart
                       series={scenario.baseline_curve || []}
                       overlay={change?.before_curve || null}
+                      overlayColor={appColor}
                       height={200}
                       testId={`scenario-chart-before-${scenario.id}`}
                     />
@@ -218,6 +209,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
                     <HourlyLineChart
                       series={scenario.shifted_curve || scenario.baseline_curve || []}
                       overlay={change?.after_curve || null}
+                      overlayColor={appColor}
                       height={200}
                       testId={`scenario-chart-after-${scenario.id}`}
                     />
@@ -230,7 +222,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
                   </span>
                   {change?.appliance && (
                     <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
-                      <span className="inline-block w-5 border-t-2 border-violet" />
+                      <span className="inline-block w-5 border-t-2" style={{ borderColor: appColor }} />
                       {change.appliance}
                     </span>
                   )}
