@@ -5,10 +5,11 @@ import {
   Layers, Store, Send, MessageCircle,
 } from 'lucide-react';
 import {
-  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, getCombinedPlan, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, chatWithClient, fmtCurrency, fmtNumber,
 } from '../lib/api';
 import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import HourlyLineChart from '../components/HourlyLineChart';
+import BlockRenderer from '../components/BlockRenderer';
 
 const APPLIANCE_HINTS = [
   { label: 'Shift HVAC peak',       appliance: 'HVAC' },
@@ -381,8 +382,9 @@ export default function ScenarioBuilder() {
   const [expandedId,       setExpandedId]       = useState(null);
   const [creatingReport,   setCreatingReport]   = useState(false);
   const [storeContext,     setStoreContext]      = useState(null);
-  const [combinedPlan,     setCombinedPlan]     = useState(null);
-  const [combinedLoading,  setCombinedLoading]  = useState(false);
+  const [combinedBlocks,   setCombinedBlocks]   = useState([]);
+  const [combinedStreaming, setCombinedStreaming] = useState(false);
+  const [combinedError,    setCombinedError]    = useState('');
 
   useEffect(() => {
     // Pick up any store context passed from baseline page
@@ -468,14 +470,43 @@ export default function ScenarioBuilder() {
   };
 
   const loadCombinedPlan = async () => {
-    setCombinedLoading(true);
+    if (combinedStreaming) return;
+    setCombinedStreaming(true);
+    setCombinedBlocks([]);
+    setCombinedError('');
     try {
-      const res = await getCombinedPlan(id);
-      setCombinedPlan(res.data);
+      const res = await fetch(`/api/clients/${id}/analyse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: 'Full site reduction plan', history: [] }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break;
+          try {
+            const block = JSON.parse(raw);
+            setCombinedBlocks(prev => [...prev, block]);
+          } catch { /* ignore partial chunks */ }
+        }
+      }
     } catch (e) {
-      setError('Failed to load combined plan.');
+      setCombinedError(e.message || 'Failed to load combined plan.');
     } finally {
-      setCombinedLoading(false);
+      setCombinedStreaming(false);
     }
   };
 
@@ -696,45 +727,31 @@ export default function ScenarioBuilder() {
               <button
                 type="button"
                 onClick={loadCombinedPlan}
-                disabled={combinedLoading}
+                disabled={combinedStreaming}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet/10 hover:bg-violet/20 text-violet text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
               >
-                {combinedLoading ? <Loader size={12} className="animate-spin" /> : <Sparkles size={12} />}
-                {combinedLoading ? 'Computing…' : combinedPlan ? 'Refresh' : 'Generate'}
+                {combinedStreaming ? <Loader size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {combinedStreaming ? 'Analysing…' : combinedBlocks.length > 0 ? 'Refresh' : 'Generate'}
               </button>
             </div>
 
-            {combinedPlan && !combinedPlan.error && (
+            {combinedBlocks.length > 0 && (
               <div className="border-t border-violet/20 px-4 py-4 space-y-4">
-                {/* Savings row */}
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="bg-forest-50 border border-forest-200 rounded-xl p-3 text-center">
-                    <p className="text-[10px] uppercase tracking-wider text-forest-600 mb-1">On current tariff</p>
-                    <p className="font-display text-lg text-forest-800 tabnum">{fmtCurrency(combinedPlan.savings_annual_low || 0)}/yr</p>
-                  </div>
-                  <div className="bg-violet/5 border border-violet/25 rounded-xl p-3 text-center">
-                    <p className="text-[10px] uppercase tracking-wider text-violet/70 mb-1">With best retailer</p>
-                    <p className="font-display text-lg text-violet tabnum">{fmtCurrency(combinedPlan.savings_annual_high || 0)}/yr</p>
-                  </div>
-                  <div className="bg-cream-50 border border-line rounded-xl p-3 text-center">
-                    <p className="text-[10px] uppercase tracking-wider text-ink-mute mb-1">Peak kWh shifted</p>
-                    <p className="font-display text-lg text-forest-900 tabnum">{fmtNumber(combinedPlan.peak_kwh_shifted || 0, 1)} kWh</p>
-                  </div>
-                </div>
-
-                {/* Per-appliance bars */}
-                {(combinedPlan.appliance_changes || []).length > 0 && (
-                  <ApplianceChangeBars changes={combinedPlan.appliance_changes} />
-                )}
-
-                {combinedPlan.rationale && (
-                  <p className="text-sm text-ink-soft leading-relaxed">{combinedPlan.rationale}</p>
-                )}
+                {combinedBlocks.map((block, i) => (
+                  <BlockRenderer key={i} block={block} />
+                ))}
               </div>
             )}
 
-            {combinedPlan?.error && (
-              <p className="px-4 py-3 text-sm text-red-600 border-t border-red-100">{combinedPlan.error}</p>
+            {combinedStreaming && combinedBlocks.length === 0 && (
+              <div className="flex items-center gap-2 px-4 py-3 border-t border-violet/20 text-sm text-ink-mute">
+                <Loader size={13} className="animate-spin text-violet" />
+                <span>Analysing site data…</span>
+              </div>
+            )}
+
+            {combinedError && (
+              <p className="px-4 py-3 text-sm text-red-600 border-t border-red-100">{combinedError}</p>
             )}
           </div>
 
