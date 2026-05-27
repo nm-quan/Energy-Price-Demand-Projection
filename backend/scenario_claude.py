@@ -47,6 +47,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [30, 42],   # 3pm–9pm TOU peak
         "to_window":   [0, 14],    # midnight–7am off-peak
         "from_scale":  0.55,
+        "scenario_name": "HVAC Pre-Cool — Shift Peak Load to Off-Peak",
         "narrative_hint": (
             "Pre-cooling strategy: run HVAC harder during cheap overnight hours to build thermal "
             "mass, then coast through the expensive 3–9pm window with reduced compressor load."
@@ -57,6 +58,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [30, 42],
         "to_window":   [0, 12],    # midnight–6am
         "from_scale":  0.35,
+        "scenario_name": "Refrigeration Pre-Cool Overnight Cycling",
         "narrative_hint": (
             "Refrigeration pre-cooling: lower thermostat setpoints overnight so the thermal mass "
             "absorbs cold, reducing compressor cycling during peak pricing window."
@@ -67,6 +69,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [30, 42],
         "to_window":   [2, 16],    # 1am–8am
         "from_scale":  0.85,
+        "scenario_name": "Dishwasher Cycles Moved to Overnight",
         "narrative_hint": (
             "Overnight scheduling: defer all dishwasher cycles to 1–8am off-peak window. "
             "No operational change needed — just reprogram the start timer."
@@ -77,6 +80,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [30, 42],
         "to_window":   [0, 14],    # midnight–7am
         "from_scale":  0.75,
+        "scenario_name": "Hot Water Pre-Heat During Off-Peak Hours",
         "narrative_hint": (
             "Hot water pre-heating: use the storage tank as a thermal battery — heat water "
             "overnight at cheap rates and maintain temperature through the peak window."
@@ -87,6 +91,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [30, 42],
         "to_window":   [16, 30],   # 8am–3pm morning rush
         "from_scale":  0.50,
+        "scenario_name": "Espresso Machine Load Concentrated in Morning",
         "narrative_hint": (
             "Machine scheduling: concentrate espresso machine operation in the morning rush "
             "(8am–3pm) and reduce afternoon idle heating during the 3–9pm peak window."
@@ -96,6 +101,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "action": "set_off",
         "from_window": [30, 42],
         "from_scale":  0.25,
+        "scenario_name": "Smart Lighting Dim 25% During Peak Window",
         "narrative_hint": (
             "Smart dimming: automate a 25% lighting reduction during 3–9pm via smart controls "
             "or occupancy sensors. Minimal customer impact, instant zero-capital saving."
@@ -106,6 +112,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "from_window": [24, 42],   # noon–9pm
         "to_window":   [6, 18],    # 3am–9am early morning
         "from_scale":  0.50,
+        "scenario_name": "Oven Baking Shifted to Early Morning Prep",
         "narrative_hint": (
             "Morning batch baking: shift prep cooking and baking to early morning hours before "
             "the peak window opens, reducing oven load during expensive afternoon pricing."
@@ -115,6 +122,7 @@ APPLIANCE_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "action": "set_off",
         "from_window": [30, 42],
         "from_scale":  0.20,
+        "scenario_name": "Misc Load Standby Reduction During Peak",
         "narrative_hint": (
             "Standby reduction: automated 20% cut to miscellaneous loads (charging stations, "
             "office equipment, displays) during peak via smart power strips or a building controller."
@@ -160,33 +168,24 @@ COMMIT_TOOL: Dict[str, Any] = {
             "savings_annual_high":  {"type": "number"},
         },
         "required": [
-            "name", "rationale", "appliance_changes", "retailer_winner",
+            "rationale", "appliance_changes", "retailer_winner",
             "negotiation_levers", "memory_bullets", "savings_annual_low", "savings_annual_high",
         ],
     },
 }
 
-COMMIT_SYSTEM = """You are a senior energy broker writing a client-facing scenario recommendation.
+COMMIT_SYSTEM = """You are a senior energy broker writing a client-facing recommendation.
+
+Your job: write rationale, appliance_changes summary, negotiation levers, memory bullets, and savings figures.
+The scenario name is already set — do not invent a different one.
 
 Rules:
-- Name: 5–8 words, mention the appliance and strategy. Be specific. Not generic.
-  Good: "HVAC Pre-Cool Before 3pm Peak Window"
-  Good: "Overnight Dishwasher Scheduling — Zero Capital"
-  Bad: "Energy Optimisation Plan" or "Load Shifting Scenario"
-
-- Rationale: exactly 2 sentences. First: what was done (name the appliance, the window, the fraction shifted).
-  Second: why this saves money (reference the TOU rate difference, demand impact, or retailer option).
-
-- appliance_changes: one entry per appliance changed. summary = one practical sentence a site manager can act on.
-
-- negotiation_levers: 3 specific talking points with real numbers from the simulation data.
-  Reference kWh shifted, % peak reduction, retailer names, dollar figures.
-
-- memory_bullets: 3 facts specific to THIS site (annual kWh, load factor, peak demand kW, % in TOU peak, etc.)
-
-- savings_annual_low  = annual_saving_on_current_tariff (tariff savings only)
-- savings_annual_high = savings_annual_low + max_saving_vs_current (add retailer switch saving)
-Both must be positive numbers."""
+- rationale: 2 sentences. First: what was done (appliance, window, fraction). Second: why this saves money.
+- appliance_changes: one entry. appliance = exact name given. summary = one actionable sentence for the site manager.
+- negotiation_levers: 3 specific talking points with real numbers (kWh shifted, % reduction, retailer names, $ figures).
+- memory_bullets: 3 facts about THIS site (annual kWh, load factor, peak demand kW, % in TOU peak).
+- savings_annual_low  = annual_saving_on_current_tariff (must be > 0)
+- savings_annual_high = savings_annual_low + max_saving_vs_current (must be > savings_annual_low)"""
 
 
 # ── Core simulation (server-side, no AI) ─────────────────────────────────────
@@ -356,11 +355,25 @@ def _finalize(
     committed: Dict[str, Any],
     sim: Dict[str, Any],
     retailer_table: Optional[Dict[str, Any]],
+    scenario_name: str,
 ) -> Dict[str, Any]:
+    # Always use the Python-generated name — AI cannot override this
+    committed["name"] = scenario_name
+
     for ch in committed.get("appliance_changes", []) or []:
         if ch.get("appliance", "").lower() == sim["appliance"].lower():
             ch["before_curve"] = sim["before_curve"]
             ch["after_curve"]  = sim["after_curve"]
+
+    # If AI returned no appliance_changes, build one from the sim result
+    if not committed.get("appliance_changes"):
+        committed["appliance_changes"] = [{
+            "appliance": sim["appliance"],
+            "action": sim["action"],
+            "summary": f"Shifted {sim['peak_kwh_shifted']:.1f} kWh/day out of 3–9pm peak window",
+            "before_curve": sim["before_curve"],
+            "after_curve":  sim["after_curve"],
+        }]
 
     committed["shifted_curve"] = sim["total_curve_after"]
     if retailer_table:
@@ -424,7 +437,8 @@ def _generate_one(
         logger.warning("scenario %d: no commit tool call", scenario_idx)
         return None
 
-    result = _finalize(dict(tu.input or {}), sim, retailer_result)
+    scenario_name = strategy.get("scenario_name", f"{target} Load Shift Plan")
+    result = _finalize(dict(tu.input or {}), sim, retailer_result, scenario_name)
     result["baseline_curve"] = [round(v, 3) for v in baseline_curve]
     return result
 
