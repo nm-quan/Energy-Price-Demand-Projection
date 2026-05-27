@@ -3,7 +3,7 @@ services:
     name: energy-price-demand-projection
     runtime: python
     pythonVersion: "3.11.9"
-    buildCommand: pip install -r requirements.txt && npm --prefix frontend install && CI=false npm --prefix frontend run build
+    buildCommand: pip install -r requirements.txt
     startCommand: cd backend && uvicorn server:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY
