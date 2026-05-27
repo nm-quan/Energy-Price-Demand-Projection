@@ -380,7 +380,7 @@ function ApplChangeBars({ changes }) {
 }
 
 function MultiScenarioBlock({ block }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
 
   if (block.error) {
     return (

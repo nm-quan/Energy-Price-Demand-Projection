@@ -598,6 +598,8 @@ async def stream_analysis(
 
     if is_plan:
         blocks = _coerce_plan_blocks(blocks, top3)
+        logger.info("plan coercion applied: top3=%s, block_types=%s",
+                    top3, [b.get("type") for b in blocks])
 
     for block in blocks:
         try:
