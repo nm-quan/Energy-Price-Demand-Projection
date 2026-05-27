@@ -384,6 +384,7 @@ async def stream_analysis(
             yield f"data: {json.dumps(resolved)}\n\n"
         except Exception as exc:
             logger.exception("Block resolution failed: type=%s", block.get("type"))
-            yield f"data: {json.dumps({'type': 'error', 'text': f\"Block error ({block.get('type')}): {exc}\"})}\n\n"
+            err_msg = f"Block error ({block.get('type')}): {exc}"
+            yield f"data: {json.dumps({'type': 'error', 'text': err_msg})}\n\n"
 
     yield "data: [DONE]\n\n"
