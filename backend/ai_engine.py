@@ -29,6 +29,25 @@ logger = logging.getLogger("ai_engine")
 MODEL_NAME = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 4096
 
+PLAN_KEYWORDS = [
+    "full site", "reduction plan", "top 3", "top three",
+    "just make it cheaper", "make it cheaper",
+    "peak hour reduction", "all appliances",
+]
+
+# Server-side simulation parameters — used when building multi_scenario blocks
+# without relying on the AI to pick them.
+DEFAULT_CHANGES: Dict[str, Dict[str, Any]] = {
+    "Fridges":    {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 12],  "from_scale": 0.35},
+    "HVAC":       {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 16],  "from_scale": 0.55},
+    "Dishwasher": {"action": "shift_window", "from_window": [30, 42], "to_window": [2, 16],  "from_scale": 0.85},
+    "Hot Water":  {"action": "shift_window", "from_window": [30, 42], "to_window": [0, 14],  "from_scale": 0.75},
+    "Ovens":      {"action": "shift_window", "from_window": [24, 42], "to_window": [6, 18],  "from_scale": 0.50},
+    "Espresso":   {"action": "shift_window", "from_window": [30, 42], "to_window": [16, 30], "from_scale": 0.50},
+    "Lighting":   {"action": "set_off",      "from_window": [30, 42], "from_scale": 0.25},
+    "Misc":       {"action": "set_off",      "from_window": [30, 42], "from_scale": 0.20},
+}
+
 
 # ── Tool schema ───────────────────────────────────────────────────────────────
 
@@ -292,21 +311,16 @@ def _build_messages(
         f"Available appliances: {', '.join(appliance_curves.keys())}\n"
     )
 
-    PLAN_KEYWORDS = [
-        "full site", "reduction plan", "top 3", "top three",
-        "just make it cheaper", "make it cheaper",
-        "peak hour reduction", "all appliances",
-    ]
     is_plan = any(kw in prompt.lower() for kw in PLAN_KEYWORDS)
 
     if is_plan:
-        mandate = (
-            f"\n\n⚠ MANDATORY: Output ONE block of type \"multi_scenario\" with changes "
-            f"for these 3 appliances in order: {', '.join(top3_names)}. "
-            f"Use the EXACT names from Available appliances above. "
-            f"Do NOT output type=\"scenario\"."
+        plan_hint = (
+            f"\n\nThis is a combined plan request. The server will automatically run the "
+            f"multi-appliance simulation for {', '.join(top3_names)}. "
+            f"Generate: headline + kpi_row (2–3 current-state metrics) + recommendation. "
+            f"Do NOT generate scenario or multi_scenario blocks — they will be added automatically."
         )
-        user_content = f"{site_ctx}\nUser request: {prompt}{mandate}"
+        user_content = f"{site_ctx}\nUser request: {prompt}{plan_hint}"
     else:
         user_content = f"{site_ctx}\nUser request: {prompt}"
 
@@ -350,6 +364,49 @@ def _call_ai(
     blocks = list(tu.input.get("blocks") or [])
     logger.info("compose_analysis: %d blocks for prompt=%r", len(blocks), prompt[:60])
     return blocks
+
+
+# ── Plan-request post-processor ───────────────────────────────────────────────
+
+def _coerce_plan_blocks(
+    blocks: List[Dict[str, Any]],
+    top3: List[str],
+) -> List[Dict[str, Any]]:
+    """For plan requests: strip any AI-generated scenario/multi_scenario blocks and
+    inject a server-built multi_scenario + retailer_table at the right position.
+    The AI is only responsible for headline, kpi_row, recommendation text."""
+    changes = []
+    for app in top3:
+        key = next((k for k in DEFAULT_CHANGES if k.lower() == app.lower()), None)
+        params = DEFAULT_CHANGES[key] if key else {
+            "action": "shift_window", "from_window": [30, 42], "to_window": [0, 14], "from_scale": 0.40,
+        }
+        changes.append({"appliance": app, **params})
+
+    ms_block = {
+        "type": "multi_scenario",
+        "name": f"Full Site Peak Reduction — {' + '.join(top3)}",
+        "rationale": (
+            f"This combined plan targets your top {len(top3)} TOU-peak appliances "
+            f"({', '.join(top3)}) and shifts their afternoon load to overnight. "
+            "Each change is applied sequentially to the already-modified curve, so the "
+            "combined saving exceeds any single shift alone."
+        ),
+        "changes": changes,
+    }
+
+    # Strip any scenario / multi_scenario / retailer_table the AI may have generated
+    clean = [b for b in blocks if b.get("type") not in ("scenario", "multi_scenario", "retailer_table")]
+
+    # Insert after the last kpi_row or headline block
+    insert_pos = -1
+    for i, b in enumerate(clean):
+        if b.get("type") in ("kpi_row", "headline"):
+            insert_pos = i
+
+    clean.insert(insert_pos + 1, {"type": "retailer_table"})
+    clean.insert(insert_pos + 1, ms_block)
+    return clean
 
 
 # ── Multi-scenario helpers ────────────────────────────────────────────────────
@@ -520,6 +577,14 @@ async def stream_analysis(
     prompt: str,
     history: List[Dict[str, str]],
 ) -> AsyncGenerator[str, None]:
+    is_plan = any(kw in prompt.lower() for kw in PLAN_KEYWORDS)
+
+    if is_plan:
+        def _tou(n: str) -> float:
+            c = appliance_curves.get(n, [])
+            return sum(c[b] * 0.5 for b in range(30, 42) if b < len(c))
+        top3 = sorted(appliance_curves, key=_tou, reverse=True)[:3]
+
     try:
         blocks = await asyncio.to_thread(
             _call_ai,
@@ -530,6 +595,9 @@ async def stream_analysis(
         yield f"data: {json.dumps({'type': 'error', 'text': str(exc)[:300]})}\n\n"
         yield "data: [DONE]\n\n"
         return
+
+    if is_plan:
+        blocks = _coerce_plan_blocks(blocks, top3)
 
     for block in blocks:
         try:
