@@ -1019,7 +1019,11 @@ def delete_report(report_id: str):
 
 import os as _os
 
-_FRONTEND_BUILD = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "build")
+_FRONTEND_BUILD = _os.path.abspath(
+    _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "frontend", "build")
+)
+
+logger.info("Frontend build path: %s — exists: %s", _FRONTEND_BUILD, _os.path.isdir(_FRONTEND_BUILD))
 
 if _os.path.isdir(_FRONTEND_BUILD):
     app.mount("/static", StaticFiles(directory=_os.path.join(_FRONTEND_BUILD, "static")), name="static")
@@ -1028,3 +1032,7 @@ if _os.path.isdir(_FRONTEND_BUILD):
     def serve_frontend(full_path: str):
         index = _os.path.join(_FRONTEND_BUILD, "index.html")
         return FileResponse(index)
+else:
+    @app.get("/")
+    def no_frontend():
+        return {"status": "api running", "frontend_build": _FRONTEND_BUILD, "found": False}
