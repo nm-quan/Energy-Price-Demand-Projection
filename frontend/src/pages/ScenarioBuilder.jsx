@@ -12,11 +12,11 @@ import HourlyLineChart from '../components/HourlyLineChart';
 
 const HINT_PROMPTS = [
   'Just make it cheaper',
-  'No upfront cost',
-  'Fastest payback',
-  'Switch retailer too',
+  'Full site reduction plan',
+  'Top 3 appliance saves',
+  'Peak hour reduction package',
   'Cut the peak bill',
-  'Overnight shift only',
+  'Overnight shifts only',
 ];
 
 // ── Appliance before/after bars ──────────────────────────────────────────────
@@ -371,7 +371,7 @@ export default function ScenarioBuilder() {
   const [activeTab,        setActiveTab]        = useState('scenarios');
   const [client,           setClient]           = useState(null);
   const [scenarios,        setScenarios]        = useState([]);
-  const [count,            setCount]            = useState(3);
+  const count = 1;
   const [extraInstruction, setExtraInstruction] = useState('');
   const [generating,       setGenerating]       = useState(false);
   const [progress,         setProgress]         = useState('');
@@ -407,7 +407,7 @@ export default function ScenarioBuilder() {
       const aggStoreIds = storeContext?.store_ids?.length > 0 ? storeContext.store_ids : null;
       const res   = await startGenerateScenarios(id, count, extraInstruction.trim() || null, aggStoreIds);
       const jobId = res.data.job_id;
-      setProgress(`Claude is analysing the site (count=${count})…`);
+      setProgress('Claude is analysing the site…');
       const start = Date.now();
       const poll  = async () => {
         const elapsed = Math.floor((Date.now() - start) / 1000);
@@ -436,7 +436,7 @@ export default function ScenarioBuilder() {
           setProgress('');
         } else {
           const completed = partial.length;
-          setProgress(`${completed} of ${count} scenario${count > 1 ? 's' : ''} ready · ${elapsed}s`);
+          setProgress(`Scenario ready · ${elapsed}s`);
           setTimeout(poll, 1000);
         }
       };
@@ -557,21 +557,12 @@ export default function ScenarioBuilder() {
                 <Sparkles size={16} className="text-forest-900" strokeWidth={2.5} />
               </div>
               <div>
-                <h2 className="font-display text-xl">Generate scenarios</h2>
-                <p className="text-xs text-forest-100/60">Pick how many. Add an optional focus. Claude does the rest.</p>
+                <h2 className="font-display text-xl">Generate scenario</h2>
+                <p className="text-xs text-forest-100/60">Add an optional focus or pick a suggestion below.</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3 flex-wrap mb-4">
-              <label className="text-[11px] uppercase tracking-wider text-forest-100/70">Count</label>
-              <input
-                type="number"
-                min={1} max={10}
-                value={count}
-                onChange={(e) => setCount(Math.max(1, Math.min(10, parseInt(e.target.value || '1', 10))))}
-                data-testid="scenario-count-input"
-                className="w-16 bg-forest-700 border border-forest-600 rounded-lg px-3 py-1.5 text-sm tabnum focus:outline-none focus:border-lime"
-              />
               <input
                 type="text"
                 value={extraInstruction}
@@ -659,7 +650,7 @@ export default function ScenarioBuilder() {
                 <Sparkles size={20} className="text-forest-800" />
               </div>
               <h3 className="font-display text-xl text-forest-900 mb-1">No scenarios yet.</h3>
-              <p className="text-sm text-ink-mute">Set a count above and click <span className="font-semibold">Generate</span>.</p>
+              <p className="text-sm text-ink-mute">Add a focus or pick a suggestion above, then click <span className="font-semibold">Generate</span>.</p>
             </div>
           )}
 

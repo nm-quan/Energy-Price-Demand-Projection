@@ -5,14 +5,14 @@ import { getClient } from '../lib/api';
 import BlockRenderer from '../components/BlockRenderer';
 
 const HINTS = [
-  'Make it cheaper',
+  'Just make it cheaper',
+  'Full site reduction plan',
+  'Top 3 appliance saves',
+  'Peak hour reduction package',
   'Cut the fridge',
   'Shift dishwasher',
-  'Show load profile',
   'Which retailer is best?',
-  'What uses most power?',
-  'No upfront cost options',
-  'Pre-cool HVAC',
+  'Show load profile',
 ];
 
 function summariseTurn(turn) {
