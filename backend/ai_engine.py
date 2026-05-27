@@ -26,7 +26,7 @@ from scenario_claude import _run_simulation, _aggregate, compute_retailer_compar
 
 logger = logging.getLogger("ai_engine")
 
-MODEL_NAME = "claude-haiku-4-5-20251001"
+MODEL_NAME = "claude-sonnet-4-6"
 MAX_TOKENS = 4096
 
 PLAN_KEYWORDS = [
