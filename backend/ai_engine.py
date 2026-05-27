@@ -213,7 +213,7 @@ scale (efficiency upgrade, applies to whole curve):
 "HVAC" / "air con" → appliance=HVAC, shift_window
 "hot water" → appliance=Hot Water, shift_window
 "lighting" / "dim" → appliance=Lighting, set_off
-"cheapest" / "no upfront" → shift_window + set_off scenarios only
+"cheapest" / "just make it cheaper" / "no upfront" → multi_scenario (top 3 by TOU-peak kWh)
 "fastest payback" → appliance with most TOU-peak kWh
 "show load" / "usage" → load_chart, no scenario
 "retailer" / "switch" → retailer_table + recommendation
@@ -226,7 +226,16 @@ MUST include appliance AND strategy:
   ✗ "Energy Optimisation Plan"
   ✗ "Load Shifting Scenario"
 
-Always be specific. Use actual numbers from the data in your rationale and levers."""
+Always be specific. Use actual numbers from the data in your rationale and levers.
+
+=== MANDATORY ROUTING (OVERRIDES ALL OTHER RULES) ===
+If the user request contains ANY of: "full site", "reduction plan", "top 3", "top three",
+"just make it cheaper", "make it cheaper", "peak hour reduction", "all appliances" —
+you MUST use type="multi_scenario". NEVER type="scenario" for these requests.
+When using multi_scenario:
+  → changes array MUST have exactly 3 items.
+  → Appliance names MUST match EXACTLY from "Available appliances:" (case-sensitive).
+  → Order highest TOU-peak kWh first."""
 
 
 # ── Message builder ───────────────────────────────────────────────────────────
@@ -265,6 +274,7 @@ def _build_messages(
 
     sorted_apps = sorted(appliance_curves, key=tou_kwh, reverse=True)
     rows = "\n".join(_appliance_row(n, appliance_curves[n]) for n in sorted_apps)
+    top3_names = sorted_apps[:min(3, len(sorted_apps))]
 
     site_ctx = (
         f"Site: {client.get('name')} ({client.get('site_type', 'commercial')})\n"
@@ -278,11 +288,30 @@ def _build_messages(
         f"\nAppliance breakdown (sorted by TOU-peak kWh):\n"
         f"  {'Appliance':<14} off-pk        mid          TOU-peak             eve    peak hour\n"
         f"{rows}\n"
-        f"\nAvailable appliances: {', '.join(appliance_curves.keys())}\n"
+        f"\nTop 3 appliances by TOU-peak kWh (use these for multi_scenario): {', '.join(top3_names)}\n"
+        f"Available appliances: {', '.join(appliance_curves.keys())}\n"
     )
 
+    PLAN_KEYWORDS = [
+        "full site", "reduction plan", "top 3", "top three",
+        "just make it cheaper", "make it cheaper",
+        "peak hour reduction", "all appliances",
+    ]
+    is_plan = any(kw in prompt.lower() for kw in PLAN_KEYWORDS)
+
+    if is_plan:
+        mandate = (
+            f"\n\n⚠ MANDATORY: Output ONE block of type \"multi_scenario\" with changes "
+            f"for these 3 appliances in order: {', '.join(top3_names)}. "
+            f"Use the EXACT names from Available appliances above. "
+            f"Do NOT output type=\"scenario\"."
+        )
+        user_content = f"{site_ctx}\nUser request: {prompt}{mandate}"
+    else:
+        user_content = f"{site_ctx}\nUser request: {prompt}"
+
     messages: List[Dict[str, Any]] = list(history)
-    messages.append({"role": "user", "content": f"{site_ctx}\nUser request: {prompt}"})
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
