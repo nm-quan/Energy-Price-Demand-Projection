@@ -16,7 +16,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # In-memory job store for async scenario generation
@@ -37,8 +37,9 @@ from interval_parser import (
 import anthropic as _anthropic
 import os
 
-from baseline_engine import compute_baseline
+from baseline_engine import compute_baseline, compute_shape_metrics
 from scenario_claude import generate_scenarios, generate_single, _has_api_key, compute_retailer_comparison
+from ai_engine import stream_analysis as _stream_analysis
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -823,6 +824,47 @@ def clear_client_scenarios(client_id: str):
         data_store.scenarios.pop(sid, None)
     data_store.save_to_disk()
     return {"deleted": len(ids)}
+
+
+# ── AI Analysis (SSE streaming) ───────────────────────────────────────────────
+
+class AnalyseRequest(BaseModel):
+    prompt: str
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@app.post("/api/clients/{client_id}/analyse")
+async def analyse_client(client_id: str, body: AnalyseRequest):
+    client = data_store.clients.get(client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not _has_api_key():
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    tariff = _resolve_tariff(client_id)
+    load_curve, annual_kwh = _get_client_load_curve(client_id, client)
+    site_type = client.get("site_type", "cafe")
+    appliance_curves = _split_appliance_curves(load_curve, site_type)
+    shape = compute_shape_metrics(load_curve, annual_kwh)
+
+    return StreamingResponse(
+        _stream_analysis(
+            client=client,
+            appliance_curves=appliance_curves,
+            baseline_curve=load_curve,
+            tariff=tariff,
+            annual_kwh=annual_kwh,
+            shape=shape,
+            prompt=body.prompt,
+            history=body.history or [],
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ── Chat ─────────────────────────────────────────────────────────────────────

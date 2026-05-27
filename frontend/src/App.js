@@ -7,6 +7,7 @@ import StorePortfolio from './pages/StorePortfolio';
 import BaselineAnalysis from './pages/BaselineAnalysis';
 import ScenarioBuilder from './pages/ScenarioBuilder';
 import Report from './pages/Report';
+import AIAnalysis from './pages/AIAnalysis';
 
 function Sidebar({ clientId, clientName }) {
   const location = useLocation();
@@ -70,6 +71,12 @@ function Sidebar({ clientId, clientName }) {
                 testId="sidebar-nav-scenarios"
               />
               <NavItem
+                to={`/clients/${clientId}/ai`}
+                label="AI Analysis"
+                active={isActive(`/clients/${clientId}/ai`)}
+                testId="sidebar-nav-ai"
+              />
+              <NavItem
                 to={`/clients/${clientId}/report`}
                 label="Reports"
                 active={isActive(`/clients/${clientId}/report`)}
@@ -117,6 +124,7 @@ export default function App() {
         <Route path="/clients/:id/portfolio" element={<AppLayoutWrapper><StorePortfolio /></AppLayoutWrapper>} />
         <Route path="/clients/:id/baseline" element={<AppLayoutWrapper><BaselineAnalysis /></AppLayoutWrapper>} />
         <Route path="/clients/:id/scenarios" element={<AppLayoutWrapper><ScenarioBuilder /></AppLayoutWrapper>} />
+        <Route path="/clients/:id/ai" element={<AppLayoutWrapper><AIAnalysis /></AppLayoutWrapper>} />
         <Route path="/clients/:id/report" element={<AppLayoutWrapper><Report /></AppLayoutWrapper>} />
       </Routes>
     </BrowserRouter>
