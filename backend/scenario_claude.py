@@ -98,15 +98,15 @@ COMMIT_TOOL: Dict[str, Any] = {
 
 SIMULATE_SYSTEM = """You are an energy analyst. You will be told which appliance to shift — follow the instruction exactly.
 
-The user message shows per-appliance load data and specifies a "Target appliance for this scenario".
-You MUST call simulate_appliance_change for that exact appliance.
-
-How to set the parameters:
-- action: always use shift_window
-- from_window: [30, 42] (3pm–9pm TOU peak) — shift whatever load exists there
-- to_window: [0, 16] (midnight–8am off-peak)
-- from_scale: 0.5 to 0.7
-- appliance: use the exact name from "Appliance names" list"""
+You will receive per-appliance load data showing kWh in each window and what % falls in the TOU peak (3–9pm, buckets 30–42).
+Rules:
+- ONLY shift an appliance that has actual load in the TOU peak window (>10% in peak).
+- Pick the appliance with the MOST kWh in the TOU peak window.
+- Set from_window to the actual hours that appliance runs during peak (e.g. [30, 42]).
+- Set to_window to off-peak hours: [0, 16] (midnight–8am).
+- Use from_scale 0.5–0.7.
+- If no appliance has >10% load in peak, pick the one with the highest % and shift it from its actual peak hours.
+- Use the exact appliance name as given in the user message."""
 
 COMMIT_SYSTEM = """You are an energy analyst writing a scenario summary. Be concise and specific.
 
@@ -283,9 +283,6 @@ def _build_user_message(
     all_appliances = list(appliance_share.keys())
     sorted_by_peak = sorted(all_appliances, key=tou_peak_kwh, reverse=True)
 
-    # Rotate through appliances by scenario index so each scenario targets a different one
-    target_appliance = sorted_by_peak[(scenario_idx - 1) % len(sorted_by_peak)] if sorted_by_peak else None
-
     load_lines = "\n".join(
         _appliance_load_summary(n, appliance_curves.get(n, [0.0] * 48))
         for n in sorted_by_peak
@@ -296,6 +293,7 @@ def _build_user_message(
         f"Tariff: {tariff.retailer} {tariff.plan_name} — peak ${rates.peak or 0:.3f}, off-peak ${rates.offpeak or 0:.3f}/kWh\n"
         f"\nAppliance load (kWh/day), sorted by TOU-peak exposure:\n{load_lines}\n"
         f"\nAppliance names (use exactly): {', '.join(all_appliances)}\n"
+        f"Scenario {scenario_idx} of {total_count}."
     )
     if target_appliance:
         msg += f"Target appliance for this scenario: {target_appliance}\n"
