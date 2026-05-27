@@ -286,6 +286,7 @@ def _build_user_message(
     # Rotate through appliances by scenario index so each scenario targets a different one
     target_appliance = sorted_by_peak[(scenario_idx - 1) % len(sorted_by_peak)] if sorted_by_peak else None
 
+
     load_lines = "\n".join(
         _appliance_load_summary(n, appliance_curves.get(n, [0.0] * 48))
         for n in sorted_by_peak
