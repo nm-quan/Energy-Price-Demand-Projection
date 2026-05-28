@@ -40,7 +40,6 @@ import os
 from baseline_engine import compute_baseline, compute_shape_metrics
 from scenario_claude import generate_scenarios, generate_single, _has_api_key, compute_retailer_comparison
 from ai_engine import stream_analysis as _stream_analysis
-from ai_engine import DEFAULT_CHANGES, _apply_change, _aggregate, _resolve_multi_scenario_block
 
 logger = logging.getLogger("broker_api")
 logging.basicConfig(level=logging.INFO)
@@ -830,7 +829,7 @@ def clear_client_scenarios(client_id: str):
     return {"deleted": len(ids)}
 
 
-# ── AI Analyse (SSE streaming) ────────────────────────────────────────────────
+# ── AI Analysis (SSE streaming) ───────────────────────────────────────────────
 
 class AnalyseRequest(BaseModel):
     prompt: str
@@ -870,8 +869,6 @@ async def analyse_client(client_id: str, body: AnalyseRequest):
         },
     )
 
-
-# ── Combined Plan ─────────────────────────────────────────────────────────────
 
 # ── Chat ─────────────────────────────────────────────────────────────────────
 
