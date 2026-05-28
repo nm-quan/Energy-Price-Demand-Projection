@@ -50,6 +50,7 @@ export const getGenerationJob = (jobId) => api.get(`/api/scenarios/jobs/${jobId}
 export const listScenarios = (id) => api.get(`/api/clients/${id}/scenarios`);
 export const deleteScenario = (sid) => api.delete(`/api/scenarios/${sid}`);
 export const clearClientScenarios = (id) => api.delete(`/api/clients/${id}/scenarios`);
+export const savePlanScenario = (clientId, block) => api.post(`/api/clients/${clientId}/scenarios/save-plan`, { block });
 
 // Chat
 export const chatWithClient = (id, messages, userMessage) =>

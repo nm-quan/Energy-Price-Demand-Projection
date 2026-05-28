@@ -1,15 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ChevronRight, Loader, AlertCircle, Sparkles, Trash2, ArrowRight, FileText, Check, ChevronDown, ChevronUp,
   Layers, Store,
 } from 'lucide-react';
 import {
-  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, fmtCurrency, fmtNumber,
+  getClient, startGenerateScenarios, getGenerationJob, listScenarios, deleteScenario, clearClientScenarios, createReport, savePlanScenario, fmtCurrency, fmtNumber,
 } from '../lib/api';
 import { APPLIANCE_LAYERS } from '../components/StackedAreaChart';
 import HourlyLineChart from '../components/HourlyLineChart';
-import BlockRenderer from '../components/BlockRenderer';
 
 const APPLIANCE_HINTS = [
   { label: 'Shift HVAC peak',       appliance: 'HVAC' },
@@ -283,10 +282,9 @@ export default function ScenarioBuilder() {
   const [selectedIds,      setSelectedIds]      = useState(new Set());
   const [expandedId,       setExpandedId]       = useState(null);
   const [creatingReport,   setCreatingReport]   = useState(false);
-  const [storeContext,     setStoreContext]      = useState(null);
-  const [combinedBlocks,   setCombinedBlocks]   = useState([]);
+  const [storeContext,      setStoreContext]      = useState(null);
   const [combinedStreaming, setCombinedStreaming] = useState(false);
-  const [combinedError,    setCombinedError]    = useState('');
+  const [combinedError,     setCombinedError]    = useState('');
 
   useEffect(() => {
     // Pick up any store context passed from baseline page
@@ -365,8 +363,8 @@ export default function ScenarioBuilder() {
   const loadCombinedPlan = async () => {
     if (combinedStreaming) return;
     setCombinedStreaming(true);
-    setCombinedBlocks([]);
     setCombinedError('');
+    const collected = [];
     try {
       const res = await fetch(`/api/clients/${id}/analyse`, {
         method: 'POST',
@@ -390,11 +388,20 @@ export default function ScenarioBuilder() {
           if (!line.startsWith('data: ')) continue;
           const raw = line.slice(6).trim();
           if (raw === '[DONE]') break;
-          try {
-            const block = JSON.parse(raw);
-            setCombinedBlocks(prev => [...prev, block]);
-          } catch { /* ignore partial chunks */ }
+          try { collected.push(JSON.parse(raw)); } catch { /* ignore partial chunks */ }
         }
+      }
+      // Save the resolved multi_scenario block as a proper scenario
+      const planBlock = collected.find(b => b.type === 'multi_scenario' && b.resolved);
+      if (planBlock) {
+        const saveRes = await savePlanScenario(id, planBlock);
+        const saved = saveRes.data;
+        setScenarios(prev => {
+          const existingIds = new Set(prev.map(s => s.id));
+          if (existingIds.has(saved.id)) return prev;
+          return [saved, ...prev];
+        });
+        setExpandedId(saved.id);
       }
     } catch (e) {
       setCombinedError(e.message || 'Failed to load combined plan.');
@@ -504,30 +511,20 @@ export default function ScenarioBuilder() {
                     if (hint.isPlan) { loadCombinedPlan(); }
                     else { setExtraInstruction(hint.label); setTargetAppliance(hint.appliance); }
                   }}
-                  className={`hint-bubble ${!hint.isPlan && extraInstruction === hint.label ? 'ring-2 ring-violet/50' : ''} ${hint.isPlan ? 'ring-2 ring-lime/40' : ''}`}
+                  disabled={hint.isPlan && combinedStreaming}
+                  className={`hint-bubble ${!hint.isPlan && extraInstruction === hint.label ? 'ring-2 ring-violet/50' : ''} ${hint.isPlan ? 'ring-2 ring-lime/40' : ''} disabled:opacity-60`}
                   style={{ background: 'rgba(255,255,255,0.06)', borderColor: 'rgba(196,233,74,0.3)', color: '#dde7c8' }}
                 >
-                  <Sparkles size={11} /> {hint.label}
+                  {hint.isPlan && combinedStreaming
+                    ? <Loader size={11} className="animate-spin" />
+                    : <Sparkles size={11} />}
+                  {hint.isPlan && combinedStreaming ? 'Analysing…' : hint.label}
                 </button>
               ))}
             </div>
 
-            {/* Inline combined plan results */}
-            {(combinedStreaming || combinedBlocks.length > 0 || combinedError) && (
-              <div className="mt-4 border-t border-forest-700/50 pt-4 space-y-3">
-                {combinedStreaming && combinedBlocks.length === 0 && (
-                  <div className="flex items-center gap-2 text-sm text-forest-100/60">
-                    <Loader size={13} className="animate-spin text-lime" />
-                    <span>Analysing site data…</span>
-                  </div>
-                )}
-                {combinedBlocks.map((block, i) => (
-                  <BlockRenderer key={i} block={block} />
-                ))}
-                {combinedError && (
-                  <p className="text-sm text-red-400">{combinedError}</p>
-                )}
-              </div>
+            {combinedError && (
+              <p className="mt-2 text-xs text-red-400">{combinedError}</p>
             )}
           </div>
 

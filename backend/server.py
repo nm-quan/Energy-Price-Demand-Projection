@@ -829,6 +829,41 @@ def clear_client_scenarios(client_id: str):
     return {"deleted": len(ids)}
 
 
+class SavePlanRequest(BaseModel):
+    block: Dict[str, Any]
+
+
+@app.post("/api/clients/{client_id}/scenarios/save-plan", status_code=201)
+def save_plan_scenario(client_id: str, body: SavePlanRequest):
+    if client_id not in data_store.clients:
+        raise HTTPException(status_code=404, detail="Client not found")
+    block = body.block
+    sid  = f"scn-{uuid.uuid4().hex[:8]}"
+    now  = datetime.now(timezone.utc).isoformat()
+    retailer_cmp = block.get("retailer_comparison") or {}
+    record = {
+        "id":                  sid,
+        "client_id":           client_id,
+        "created_at":          now,
+        "name":                block.get("title", "Full Site Plan"),
+        "rank":                None,
+        "rationale":           block.get("summary", ""),
+        "baseline_curve":      block.get("total_curve_before", []),
+        "shifted_curve":       block.get("total_curve_after", []),
+        "savings_annual_low":  block.get("savings_annual_low", 0),
+        "savings_annual_high": block.get("savings_annual_high", 0),
+        "appliance_changes":   block.get("appliance_changes", []),
+        "peak_kwh_shifted":    block.get("peak_kwh_shifted", 0),
+        "new_annual_kwh":      block.get("new_annual_kwh", 0),
+        "retailer_comparison": retailer_cmp,
+        "retailer_winner":     retailer_cmp.get("best"),
+        "negotiation_levers":  [],
+    }
+    data_store.scenarios[sid] = record
+    data_store.save_to_disk()
+    return record
+
+
 # ── AI Analysis (SSE streaming) ───────────────────────────────────────────────
 
 class AnalyseRequest(BaseModel):
