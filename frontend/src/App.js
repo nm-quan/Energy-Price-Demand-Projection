@@ -72,7 +72,7 @@ function Sidebar({ clientId, clientName }) {
               />
               <NavItem
                 to={`/clients/${clientId}/ai`}
-                label="AI Analysis"
+                label="Chat"
                 active={isActive(`/clients/${clientId}/ai`)}
                 testId="sidebar-nav-ai"
               />

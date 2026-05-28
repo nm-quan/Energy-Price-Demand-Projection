@@ -146,7 +146,7 @@ export default function AIAnalysis() {
             <Sparkles size={16} className="text-forest-800" />
           </div>
           <div>
-            <h1 className="font-display text-xl text-forest-900 leading-none">AI Analysis</h1>
+            <h1 className="font-display text-xl text-forest-900 leading-none">Chat</h1>
             {client && (
               <p className="text-xs text-ink-mute mt-0.5">
                 {client.name} · {client.site_type}

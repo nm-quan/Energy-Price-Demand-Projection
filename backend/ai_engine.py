@@ -486,10 +486,11 @@ def _resolve_multi_scenario_block(
     if not appliance_changes:
         return {**block, "resolved": True, "error": "No changes could be applied"}
 
+    aggregate_before = _aggregate({k: list(v) for k, v in appliance_curves.items()})
     final_total  = _aggregate(working)
-    baseline_sum = sum(baseline_curve)
+    baseline_sum = sum(aggregate_before)
     new_annual   = annual_kwh * (sum(final_total) / baseline_sum) if baseline_sum > 0 else annual_kwh
-    base_cost    = compute_annual_cost_components(baseline_curve, tariff, annual_kwh)["grand_total"]
+    base_cost    = compute_annual_cost_components(aggregate_before, tariff, annual_kwh)["grand_total"]
     new_cost     = compute_annual_cost_components(final_total, tariff, new_annual)["grand_total"]
     retailer     = compute_retailer_comparison(final_total, new_annual, tariff)
     saving_low   = base_cost - new_cost
@@ -499,7 +500,7 @@ def _resolve_multi_scenario_block(
         **block,
         "resolved":           True,
         "appliance_changes":  appliance_changes,
-        "total_curve_before": [round(v, 3) for v in baseline_curve],
+        "total_curve_before": [round(v, 3) for v in aggregate_before],
         "total_curve_after":  [round(v, 3) for v in final_total],
         "savings_annual_low":  max(0.0, saving_low),
         "savings_annual_high": max(0.0, saving_high),
