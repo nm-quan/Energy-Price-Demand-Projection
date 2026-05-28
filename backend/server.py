@@ -841,6 +841,21 @@ def save_plan_scenario(client_id: str, body: SavePlanRequest):
     sid  = f"scn-{uuid.uuid4().hex[:8]}"
     now  = datetime.now(timezone.utc).isoformat()
     retailer_cmp = block.get("retailer_comparison") or {}
+    levers = []
+    best_retailer = retailer_cmp.get("best")
+    current_retailer = retailer_cmp.get("current_retailer")
+    max_saving = retailer_cmp.get("max_saving_vs_current", 0)
+    comparison = retailer_cmp.get("comparison", [])
+    if best_retailer and best_retailer != current_retailer and max_saving > 0:
+        levers.append(
+            f"Switch to {best_retailer} to save an additional ~${max_saving:,.0f}/yr on top of load-shifting savings."
+        )
+    for row in [r for r in comparison[:4] if not r.get("is_current") and r.get("delta_vs_current", 0) < -50][:2]:
+        levers.append(
+            f"{row['retailer']} ({row['plan']}) costs ~${abs(row['delta_vs_current']):,.0f}/yr less than your current plan."
+        )
+    if not levers and comparison:
+        levers.append("Use this combined savings profile as leverage when negotiating your next electricity contract.")
     record = {
         "id":                  sid,
         "client_id":           client_id,
@@ -857,7 +872,7 @@ def save_plan_scenario(client_id: str, body: SavePlanRequest):
         "new_annual_kwh":      block.get("new_annual_kwh", 0),
         "retailer_comparison": retailer_cmp,
         "retailer_winner":     retailer_cmp.get("best"),
-        "negotiation_levers":  [],
+        "negotiation_levers":  levers,
     }
     data_store.scenarios[sid] = record
     data_store.save_to_disk()

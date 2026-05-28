@@ -148,11 +148,15 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
           </button>
 
           <div className="flex-1 min-w-0">
-            <span className="text-[10px] uppercase tracking-wider text-ink-mute">Proposed Plan {scenario.rank}</span>
+            <span className="text-[10px] uppercase tracking-wider text-ink-mute">
+              {scenario.rank ? `Proposed Plan ${scenario.rank}` : 'Combined Plan'}
+            </span>
             <h3 className="font-display text-xl text-forest-900 leading-tight">{scenario.name}</h3>
-            {scenario.appliance_changes?.[0] && (
+            {scenario.appliance_changes?.length > 0 && (
               <p className="text-xs text-ink-soft mt-0.5">
-                Shift <span className="font-medium text-forest-800">{scenario.appliance_changes[0].appliance}</span> off-peak
+                {scenario.appliance_changes.length > 1
+                  ? <><span className="font-medium text-forest-800">{scenario.appliance_changes.length} appliances</span> shifted off-peak</>
+                  : <>Shift <span className="font-medium text-forest-800">{scenario.appliance_changes[0].appliance}</span> off-peak</>}
                 {scenario.retailer_winner && <> → <span className="font-medium text-violet">{scenario.retailer_winner}</span></>}
                 {' → '}save ~<span className="font-medium text-forest-700 tabnum">{fmtCurrency(scenario.savings_annual_low)}/yr</span>
               </p>
@@ -185,10 +189,12 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
       {expanded && (
         <div className="border-t border-line bg-cream-100/50 px-5 py-6 space-y-6">
 
-          {/* 1 — Before / After line charts: appliance curve + total demand */}
+          {/* 1 — Before / After line charts */}
           {(() => {
-            const change = scenario.appliance_changes?.[0];
-            const appColor = APPLIANCE_LAYERS.find((l) => l.key === change?.appliance)?.color || '#5b4bff';
+            const changes = scenario.appliance_changes || [];
+            const isMulti = changes.length > 1;
+            const change  = isMulti ? null : changes[0];
+            const appColor = change ? (APPLIANCE_LAYERS.find((l) => l.key === change.appliance)?.color || '#5b4bff') : null;
             return (
               <div>
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-900 mb-3">
@@ -221,7 +227,7 @@ function ScenarioCard({ scenario, selected, onToggleSelect, onDelete, expanded, 
                     <span className="inline-block w-5 border-t-2 border-forest-900 opacity-70" />
                     Total demand
                   </span>
-                  {change?.appliance && (
+                  {!isMulti && change?.appliance && (
                     <span className="flex items-center gap-1.5 text-[11px] text-ink-soft">
                       <span className="inline-block w-5 border-t-2" style={{ borderColor: appColor }} />
                       {change.appliance}
